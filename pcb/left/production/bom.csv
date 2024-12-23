@@ -1,0 +1,11 @@
+﻿Designator,Footprint,Quantity,Value,LCSC Part #
+"D1, D10, D11, D13, D14, D15, D16, D17, D19, D2, D20, D21, D3, D4, D5, D7, D8, D9",D_SOD-123,18,D_Small,
+J1,JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal,1,Conn_01x02,
+J2,PinSocket_1x05_P2.54mm_Vertical,1,Conn_01x05,
+R1,0603,1,1M,
+R2,0603,1,100K,
+"SW1, SW10, SW11, SW13, SW14, SW15, SW16, SW17, SW19, SW2, SW20, SW21, SW3, SW4, SW5, SW7, SW8, SW9",SW_Hotswap_Kailh_Choc_V1V2_1.1,18,SW_Push,
+SW22,SW_SPDT_PCM12,1,SW_SPDT,
+SW23,Panasonic_EVQPUL_EVQPUC,1,SW_Push,
+U1,nice_nano,1,nice_nano,
+U2,TSSOP-8_4.4x3mm_P0.65mm,1,24LC256,
