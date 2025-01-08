@@ -50,7 +50,7 @@ async fn main(_spawner: Spawner) {
 
     let mut led = Output::new(p.P0_15, Level::Low, OutputDrive::Standard);
     let mut state = true;
-    // _spawner.spawn(logger_task(driver)).unwrap();
+    _spawner.spawn(logger_task(driver)).unwrap();
 
     // Create embassy-usb Config
     let mut config = Config::new(0xa55, 0x727);
@@ -69,14 +69,14 @@ async fn main(_spawner: Spawner) {
 
     let mut key_state = State::new();
 
-    let mut builder = Builder::new(
-        driver,
-        config,
-        &mut config_descriptor,
-        &mut bos_descriptor,
-        &mut msos_descriptor,
-        &mut control_buf,
-    );
+    // let mut builder = Builder::new(
+    //     driver,
+    //     config,
+    //     &mut config_descriptor,
+    //     &mut bos_descriptor,
+    //     &mut msos_descriptor,
+    //     &mut control_buf,
+    // );
 
     let key_config = embassy_usb::class::hid::Config {
         report_descriptor: KeyboardReport::desc(),
@@ -85,30 +85,21 @@ async fn main(_spawner: Spawner) {
         max_packet_size: 32,
     };
 
-    let (key_r, mut key_w) =
-        HidReaderWriter::<_, 32, 32>::new(&mut builder, &mut key_state, key_config).split();
+    // let (key_r, mut key_w) =
+    //     HidReaderWriter::<_, 32, 32>::new(&mut builder, &mut key_state, key_config).split();
 
-    builder.handler(&mut device_handler);
+    // builder.handler(&mut device_handler);
 
-    let mut usb = builder.build();
-    let usb_fut = usb.run();
-    let input = Input::new(p.P0_10, Pull::Down);
-    let output = Output::new(p.P1_11, Level::High, OutputDrive::Standard);
+    // let mut usb = builder.build();
+    // let usb_fut = usb.run();
+    let row0 = Input::new(p.P0_02, Pull::Down);
+    let row1 = Input::new(p.P1_15, Pull::Down);
+    let output = Output::new(p.P0_09, Level::High, OutputDrive::Standard);
     let mut rep_sent = false;
     let main_loop = async {
         loop {
-            if input.is_high() && !rep_sent {
-                let mut rep = KeyboardReport::default();
-                rep.keycodes[0] = KeyboardUsage::KeyboardAa as u8;
-                rep_sent = true;
-                key_w.write_serialize(&rep).await.unwrap();
-            } else if rep_sent && input.is_low() {
-                let mut rep = KeyboardReport::default();
-                rep.keycodes[0] = 0x0;
-                rep_sent = false;
-                key_w.write_serialize(&rep).await.unwrap();
-            }
-            Timer::after_micros(500).await;
+            log::info!("State: {}, {}", row0.is_high(), row1.is_high());
+            Timer::after_millis(500).await;
         }
     };
 
@@ -120,7 +111,7 @@ async fn main(_spawner: Spawner) {
             Timer::after_millis(2000).await;
         }
     };
-    join3(main_loop, usb_fut, led_loop).await;
+    join(main_loop, led_loop).await;
 }
 
 struct MyDeviceHandler {
