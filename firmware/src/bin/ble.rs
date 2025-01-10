@@ -11,6 +11,9 @@ macro_rules! hid {
 }
 
 use core::mem;
+use core::sync::atomic::AtomicBool;
+use core::sync::atomic::AtomicU8;
+use core::sync::atomic::Ordering;
 
 use bruh78::config::load_callum;
 use bruh78::descriptor::KeyboardReportNKRO;
@@ -20,14 +23,21 @@ use defmt::{info, *};
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_futures::join::join3;
+use embassy_futures::select::select_array;
 use embassy_futures::select::{select, select3};
 use embassy_futures::yield_now;
 use embassy_nrf::gpio::Pin;
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
+use embassy_nrf::gpiote;
+use embassy_nrf::gpiote::Channel;
+use embassy_nrf::gpiote::InputChannel;
+use embassy_nrf::gpiote::InputChannelPolarity;
 use embassy_nrf::interrupt::Priority;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::usb::{self, Driver};
-use embassy_nrf::{self as _, bind_interrupts, peripherals}; // time driver
+use embassy_nrf::{self as _, bind_interrupts, peripherals};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+// time driver
 use embassy_time::Timer;
 use embedded_hal::digital::{InputPin, OutputPin};
 use nrf_softdevice::ble::advertisement_builder::{
@@ -309,7 +319,7 @@ impl HidService {
 
         let report_map = service_builder.add_characteristic(
             REPORT_MAP,
-            Attribute::new(HID_REPORT_DESCRIPTOR).security(SecurityMode::JustWorks),
+            Attribute::new(KeyboardReportNKRO::desc()).security(SecurityMode::JustWorks),
             Metadata::new(Properties::new().read()),
         )?;
         let report_map_handle = report_map.build();
@@ -330,7 +340,7 @@ impl HidService {
 
         let mut input_keyboard = service_builder.add_characteristic(
             HID_REPORT,
-            Attribute::new([0u8; 8]).security(SecurityMode::JustWorks),
+            Attribute::new([0u8; 29]).security(SecurityMode::JustWorks),
             Metadata::new(Properties::new().read().notify()),
         )?;
         let input_keyboard_desc = input_keyboard.add_descriptor(
@@ -343,7 +353,7 @@ impl HidService {
 
         let mut output_keyboard = service_builder.add_characteristic(
             HID_REPORT,
-            Attribute::new([0u8; 8]).security(SecurityMode::JustWorks),
+            Attribute::new([0u8; 29]).security(SecurityMode::JustWorks),
             Metadata::new(Properties::new().read().write().write_without_response()),
         )?;
         let output_keyboard_desc = output_keyboard.add_descriptor(
@@ -534,11 +544,27 @@ async fn main(spawner: Spawner) {
         Output::new(p.P0_09.degrade(), Level::Low, OutputDrive::Standard),
     ];
 
-    let rows = [
-        Input::new(p.P0_02.degrade(), Pull::Down),
-        Input::new(p.P1_15.degrade(), Pull::Down),
-        Input::new(p.P1_11.degrade(), Pull::Down),
-        Input::new(p.P0_10.degrade(), Pull::Down),
+    let mut rows = [
+        InputChannel::new(
+            p.GPIOTE_CH0.degrade(),
+            Input::new(p.P0_02.degrade(), Pull::Down),
+            InputChannelPolarity::LoToHi,
+        ),
+        InputChannel::new(
+            p.GPIOTE_CH1.degrade(),
+            Input::new(p.P1_15.degrade(), Pull::Down),
+            InputChannelPolarity::LoToHi,
+        ),
+        InputChannel::new(
+            p.GPIOTE_CH2.degrade(),
+            Input::new(p.P1_11.degrade(), Pull::Down),
+            InputChannelPolarity::LoToHi,
+        ),
+        InputChannel::new(
+            p.GPIOTE_CH3.degrade(),
+            Input::new(p.P0_10.degrade(), Pull::Down),
+            InputChannelPolarity::LoToHi,
+        ),
     ];
 
     let mut keys = Keys::<39>::default();
@@ -562,41 +588,65 @@ async fn main(spawner: Spawner) {
         Timer::after_secs(2).await;
         let main_loop = async {
             loop {
-                for i in 0..columns.len() {
-                    columns[i].set_high();
-                    for j in 0..rows.len() {
-                        if j == 3 {
-                            if i > 1 {
-                                let index = j * 5 + i - 2;
-                                keys.update_buf(index, rows[j].is_high());
-                            }
-                        } else {
-                            let index = j * 5 + i;
-                            keys.update_buf(index, rows[j].is_high());
-                        }
-                    }
-                    columns[i].set_low();
+                led.set_high();
+                for power in &mut columns {
+                    power.set_high();
                 }
-                match report.generate_report(&mut keys) {
-                    Some(rep) => {
-                        let val = [
-                            rep.modifier,
-                            0,
-                            rep.keycodes[0],
-                            rep.keycodes[1],
-                            rep.keycodes[2],
-                            rep.keycodes[3],
-                            rep.keycodes[4],
-                            rep.keycodes[5],
-                        ];
-                        server.hid.notify(&conn, &val);
-                        led.set_high();
+                let mut low = true;
+                for row in &mut rows {
+                    if row.is_high().unwrap() {
+                        low = false;
+                        break;
                     }
-                    _ => {
-                        led.set_low();
+                }
+                if low {
+                    select_array([
+                        rows[0].wait(),
+                        rows[1].wait(),
+                        rows[2].wait(),
+                        rows[3].wait(),
+                    ])
+                    .await;
+                }
+                for power in &mut columns {
+                    power.set_low();
+                }
+                led.set_low();
+                'key: loop {
+                    let mut pressed = false;
+                    for i in 0..columns.len() {
+                        columns[i].set_high();
+                        for j in 0..rows.len() {
+                            if j == 3 {
+                                if i > 1 {
+                                    let index = j * 5 + i - 2;
+                                    let res = rows[j].is_high().unwrap();
+                                    pressed = pressed || res;
+                                    keys.update_buf(index, res);
+                                }
+                            } else {
+                                let index = j * 5 + i;
+                                let res = rows[j].is_high().unwrap();
+                                pressed = pressed || res;
+                                keys.update_buf(index, res);
+                            }
+                        }
+                        columns[i].set_low();
                     }
-                };
-                Timer::after_millis(5).await;
+                    match report.generate_report(&mut keys) {
+                        Some(rep) => {
+                            let mut val = [0u8; 29];
+                            val[0] = rep.modifier;
+                            val[1..29].copy_from_slice(&rep.nkro_keycodes);
+                            server.hid.notify(&conn, &val);
+                        }
+                        _ => {}
+                    };
+                    if !pressed {
+                        break 'key;
+                    }
+                    Timer::after_millis(5).await;
+                }
             }
         };
 
