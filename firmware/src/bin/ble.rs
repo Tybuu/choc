@@ -11,19 +11,24 @@ macro_rules! hid {
 }
 
 use core::mem;
-use core::ptr::null;
+
+use bruh78::config::load_callum;
+use bruh78::descriptor::KeyboardReportNKRO;
+use bruh78::keys::Keys;
+use bruh78::report::Report;
 use defmt::{info, *};
-use defmt_rtt as _; // global logger
 use embassy_executor::Spawner;
+use embassy_futures::join::join;
 use embassy_futures::join::join3;
 use embassy_futures::select::{select, select3};
 use embassy_futures::yield_now;
+use embassy_nrf::gpio::Pin;
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::interrupt::Priority;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::usb::{self, Driver};
 use embassy_nrf::{self as _, bind_interrupts, peripherals}; // time driver
-use embassy_time::{Delay, Duration, Instant, Timer};
+use embassy_time::Timer;
 use embedded_hal::digital::{InputPin, OutputPin};
 use nrf_softdevice::ble::advertisement_builder::{
     AdvertisementDataType, Flag, LegacyAdvertisementBuilder, LegacyAdvertisementPayload,
@@ -36,12 +41,13 @@ use nrf_softdevice::ble::gatt_server::characteristic::{
 use nrf_softdevice::ble::gatt_server::{CharacteristicHandles, RegisterError, WriteOp};
 use nrf_softdevice::ble::security::SecurityHandler;
 use nrf_softdevice::ble::{gatt_server, peripheral, Connection, SecurityMode, Uuid};
-use nrf_softdevice::raw::sd_ble_gatts_sys_attr_set;
 use nrf_softdevice::{raw, Softdevice};
-use panic_probe as _;
-use serde::Serialize;
-use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 
+use defmt_rtt as _; // global logger
+use embassy_nrf as _; // time driver
+use panic_probe as _;
+use ssmarshal::serialize;
+use usbd_hid::descriptor::SerializedDescriptor;
 const DEVICE_INFORMATION: Uuid = Uuid::new_16(0x180a);
 const BATTERY_SERVICE: Uuid = Uuid::new_16(0x180f);
 
@@ -284,8 +290,8 @@ pub struct HidService {
     hid_control: u16,
     protocol_mode: u16,
     input_keyboard: u16,
-    input_keyboard_descriptor: u16,
     input_keyboard_cccd: u16,
+    input_keyboard_descriptor: u16,
     output_keyboard: u16,
     output_keyboard_descriptor: u16,
 }
@@ -331,6 +337,8 @@ impl HidService {
             Uuid::new_16(0x2908),
             Attribute::new([1u8, 1u8]).security(SecurityMode::JustWorks),
         )?; // First is ID (e.g. 1 for keyboard 2 for media keys), second is in/out
+        let input_keyboard_desc = input_keyboard
+            .add_descriptor(Uuid::new_16(0x2908), Attribute::new([KEYBOARD_ID, 1u8]))?; // First is ID (e.g. 1 for keyboard 2 for media keys), second is in/out
         let input_keyboard_handle = input_keyboard.build();
 
         let mut output_keyboard = service_builder.add_characteristic(
@@ -342,6 +350,8 @@ impl HidService {
             Uuid::new_16(0x2908),
             Attribute::new([1u8, 2u8]).security(SecurityMode::JustWorks),
         )?; // First is ID (e.g. 1 for keyboard 2 for media keys)
+        let output_keyboard_desc = output_keyboard
+            .add_descriptor(Uuid::new_16(0x2908), Attribute::new([KEYBOARD_ID, 2u8]))?; // First is ID (e.g. 1 for keyboard 2 for media keys)
         let output_keyboard_handle = output_keyboard.build();
 
         let _service_handle = service_builder.build();
@@ -352,19 +362,21 @@ impl HidService {
             hid_control: hid_control_handle.value_handle,
             protocol_mode: protocol_mode_handle.value_handle,
             input_keyboard: input_keyboard_handle.value_handle,
-            input_keyboard_descriptor: input_keyboard_desc.handle(),
             input_keyboard_cccd: input_keyboard_handle.cccd_handle,
+            input_keyboard_descriptor: input_keyboard_desc.handle(),
             output_keyboard: output_keyboard_handle.value_handle,
             output_keyboard_descriptor: output_keyboard_desc.handle(),
         })
     }
 
     pub fn on_write(&self, conn: &Connection, handle: u16, data: &[u8]) {
-        let mut val = [
+        let val = &[
             0, // Modifiers (Shift, Ctrl, Alt, GUI, etc.)
             0, // Reserved
-            0x00, 0, 0, 0, 0, 0, // Key code array - 0x04 is 'a' and 0x1d is 'z' - for example
+            0x0E, 0, 0, 0, 0, 0, // Key code array - 0x04 is 'a' and 0x1d is 'z' - for example
         ];
+        // gatt_server::notify_value(conn, self.input_keyboard_cccd, val).unwrap();
+        // gatt_server::notify_value(conn, self.input_keyboard_descriptor, val).unwrap();
         if handle == self.input_keyboard_cccd {
             info!("HID input keyboard notify: {:?}", data);
         }
@@ -439,16 +451,16 @@ struct HidSecurityHandler {}
 
 impl SecurityHandler for HidSecurityHandler {}
 
-#[embassy_executor::task]
-async fn logger_task(driver: Driver<'static, peripherals::USBD, HardwareVbusDetect>) {
-    embassy_usb_logger::run!(1024, log::LevelFilter::Info, driver);
-}
-
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     info!("Hello World!");
 
-    let soft_config = nrf_softdevice::Config {
+    let mut nrf_config = embassy_nrf::config::Config::default();
+    nrf_config.gpiote_interrupt_priority = Priority::P2;
+    nrf_config.time_interrupt_priority = Priority::P2;
+    let p = embassy_nrf::init(nrf_config);
+
+    let config = nrf_softdevice::Config {
         clock: Some(raw::nrf_clock_lf_cfg_t {
             source: raw::NRF_CLOCK_LF_SRC_RC as u8,
             rc_ctiv: 16,
@@ -481,13 +493,9 @@ async fn main(spawner: Spawner) {
         }),
         ..Default::default()
     };
-    let mut config = embassy_nrf::config::Config::default();
-    config.gpiote_interrupt_priority = Priority::P2;
-    config.time_interrupt_priority = Priority::P2;
-    let p = embassy_nrf::init(config);
 
     let mut led = Output::new(p.P0_15, Level::Low, OutputDrive::Standard);
-    let sd = Softdevice::enable(&soft_config);
+    let sd = Softdevice::enable(&config);
     let server = unwrap!(Server::new(sd, "12345678"));
     unwrap!(spawner.spawn(softdevice_task(sd)));
 
@@ -518,10 +526,27 @@ async fn main(spawner: Spawner) {
 
     static SEC: HidSecurityHandler = HidSecurityHandler {};
 
-    let input = Input::new(p.P0_02, Pull::Down);
-    let output = Output::new(p.P0_09, Level::High, OutputDrive::Standard);
+    let mut columns = [
+        Output::new(p.P1_00.degrade(), Level::Low, OutputDrive::Standard),
+        Output::new(p.P0_11.degrade(), Level::Low, OutputDrive::Standard),
+        Output::new(p.P1_04.degrade(), Level::Low, OutputDrive::Standard),
+        Output::new(p.P1_06.degrade(), Level::Low, OutputDrive::Standard),
+        Output::new(p.P0_09.degrade(), Level::Low, OutputDrive::Standard),
+    ];
+
+    let rows = [
+        Input::new(p.P0_02.degrade(), Pull::Down),
+        Input::new(p.P1_15.degrade(), Pull::Down),
+        Input::new(p.P1_11.degrade(), Pull::Down),
+        Input::new(p.P0_10.degrade(), Pull::Down),
+    ];
+
+    let mut keys = Keys::<39>::default();
+    load_callum(&mut keys);
+    let mut report = Report::default();
     loop {
         let config = peripheral::Config::default();
+
         let adv = peripheral::ConnectableAdvertisement::ScannableUndirected {
             adv_data: &ADV_DATA,
             scan_data: &SCAN_DATA,
@@ -534,34 +559,48 @@ async fn main(spawner: Spawner) {
 
         // Run the GATT server on the connection. This returns when the connection gets disconnected.
         let e = gatt_server::run(&conn, &server, |_| {});
-        let key_loop = async {
-            Timer::after_secs(2).await;
-            let mut rep_sent = false;
-            let mut state = true;
-            let mut val = [
-                0, // Modifiers (Shift, Ctrl, Alt, GUI, etc.)
-                0, // Reserved
-                0x00, 0, 0, 0, 0,
-                0, // Key code array - 0x04 is 'a' and 0x1d is 'z' - for example
-            ];
+        Timer::after_secs(2).await;
+        let main_loop = async {
             loop {
-                if input.is_high() && !rep_sent {
-                    led.set_high();
-                    rep_sent = true;
-                    val[2] = 0x04;
-                    server.hid.notify(&conn, &val);
-                } else if rep_sent && input.is_low() {
-                    led.set_low();
-                    val[2] = 0x00;
-                    server.hid.notify(&conn, &val);
-                    rep_sent = false;
+                for i in 0..columns.len() {
+                    columns[i].set_high();
+                    for j in 0..rows.len() {
+                        if j == 3 {
+                            if i > 1 {
+                                let index = j * 5 + i - 2;
+                                keys.update_buf(index, rows[j].is_high());
+                            }
+                        } else {
+                            let index = j * 5 + i;
+                            keys.update_buf(index, rows[j].is_high());
+                        }
+                    }
+                    columns[i].set_low();
                 }
-                state = !state;
+                match report.generate_report(&mut keys) {
+                    Some(rep) => {
+                        let val = [
+                            rep.modifier,
+                            0,
+                            rep.keycodes[0],
+                            rep.keycodes[1],
+                            rep.keycodes[2],
+                            rep.keycodes[3],
+                            rep.keycodes[4],
+                            rep.keycodes[5],
+                        ];
+                        server.hid.notify(&conn, &val);
+                        led.set_high();
+                    }
+                    _ => {
+                        led.set_low();
+                    }
+                };
                 Timer::after_millis(5).await;
             }
         };
 
-        let res = select(e, key_loop).await;
+        let res = select(e, main_loop).await;
         match res {
             embassy_futures::select::Either::First(e) => loop {
                 info!("disconnected!")
@@ -569,6 +608,6 @@ async fn main(spawner: Spawner) {
             _ => loop {
                 info!("shouldnt be here")
             },
-        }
+        };
     }
 }

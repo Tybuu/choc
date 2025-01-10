@@ -45,10 +45,10 @@ futures = { version = "0.3.17", default-features = false, features = [
     "async-await",
 ] }
 rand = { version = "0.8.4", default-features = false }
-serde = { version = "1.0.136", default-features = false }
 embedded-hal = { version = "1.0" }
 embedded-hal-async = { version = "1.0" }
 embedded-hal-bus = { version = "0.1", features = ["async"] }
+heapless = "*"
 nrf-softdevice = { version = "0.1.0", features = [
     "defmt",
     "ble-peripheral",
@@ -60,13 +60,15 @@ nrf-softdevice = { version = "0.1.0", features = [
     "critical-section-impl",
 ] }
 nrf-softdevice-s140 = { version = "0.1.1", optional = true }
+serde = { version = "1.0.207", default-features = false }
+ssmarshal = { version = "1.0.0", default-features = false }
 log = "0.4"
 
 [patch.crates-io]
 embassy-executor = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
 embassy-futures = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
 embassy-nrf = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
-embassy-time = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
+# embassy-time = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
 nrf-softdevice = { git = "https://github.com/embassy-rs/nrf-softdevice", branch = "master" }
 
 [profile.release]
