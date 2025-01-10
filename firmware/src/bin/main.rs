@@ -12,7 +12,7 @@ use defmt::info;
 use embassy_executor::Spawner;
 use embassy_futures::join::{self, join, join3};
 use embassy_futures::yield_now;
-use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
+use embassy_nrf::gpio::{AnyPin, Input, Level, Output, OutputDrive, Pin, Pull};
 use embassy_nrf::interrupt::{self, InterruptExt, Priority};
 use embassy_nrf::usb::vbus_detect::{HardwareVbusDetect, VbusDetect};
 use embassy_nrf::{bind_interrupts, peripherals, usb};
@@ -23,6 +23,7 @@ use embassy_time::{Instant, Timer};
 use embassy_nrf::usb::Driver;
 use embassy_usb::class::hid::{HidReaderWriter, HidWriter, State};
 use embassy_usb::{Builder, Config, Handler};
+use embedded_hal::digital::{InputPin, OutputPin};
 use usbd_hid::descriptor::{KeyboardReport, KeyboardUsage, SerializedDescriptor};
 use {defmt_rtt as _, panic_probe as _};
 
@@ -92,13 +93,33 @@ async fn main(_spawner: Spawner) {
 
     // let mut usb = builder.build();
     // let usb_fut = usb.run();
-    let row0 = Input::new(p.P0_02, Pull::Down);
-    let row1 = Input::new(p.P1_15, Pull::Down);
-    let output = Output::new(p.P0_09, Level::High, OutputDrive::Standard);
+    let mut columns = [
+        Output::new(p.P0_09.degrade(), Level::Low, OutputDrive::Standard),
+        Output::new(p.P1_06.degrade(), Level::Low, OutputDrive::Standard),
+        Output::new(p.P1_04.degrade(), Level::Low, OutputDrive::Standard),
+        Output::new(p.P0_11.degrade(), Level::Low, OutputDrive::Standard),
+        Output::new(p.P1_00.degrade(), Level::Low, OutputDrive::Standard),
+    ];
+    let rows = [
+        Input::new(p.P0_02.degrade(), Pull::Down),
+        Input::new(p.P1_15.degrade(), Pull::Down),
+        Input::new(p.P1_11.degrade(), Pull::Down),
+        Input::new(p.P0_10.degrade(), Pull::Down),
+    ];
     let mut rep_sent = false;
     let main_loop = async {
+        let mut states = [[false; 5]; 4];
         loop {
-            log::info!("State: {}, {}", row0.is_high(), row1.is_high());
+            for i in 0..columns.len() {
+                columns[i].set_high();
+                for j in 0..rows.len() {
+                    states[j][i] = rows[j].is_high();
+                }
+            }
+            log::info!("{:?}", states[0].reverse());
+            log::info!("{:?}", states[1].reverse());
+            log::info!("{:?}", states[2].reverse());
+            log::info!("{:?}", states[3].reverse());
             Timer::after_millis(500).await;
         }
     };

@@ -16,13 +16,15 @@ use defmt::{info, *};
 use defmt_rtt as _; // global logger
 use embassy_executor::Spawner;
 use embassy_futures::join::join3;
-use embassy_futures::select::select3;
+use embassy_futures::select::{select, select3};
+use embassy_futures::yield_now;
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::interrupt::Priority;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::usb::{self, Driver};
 use embassy_nrf::{self as _, bind_interrupts, peripherals}; // time driver
 use embassy_time::{Delay, Duration, Instant, Timer};
+use embedded_hal::digital::{InputPin, OutputPin};
 use nrf_softdevice::ble::advertisement_builder::{
     AdvertisementDataType, Flag, LegacyAdvertisementBuilder, LegacyAdvertisementPayload,
     ServiceList, ServiceUuid16,
@@ -33,7 +35,7 @@ use nrf_softdevice::ble::gatt_server::characteristic::{
 };
 use nrf_softdevice::ble::gatt_server::{CharacteristicHandles, RegisterError, WriteOp};
 use nrf_softdevice::ble::security::SecurityHandler;
-use nrf_softdevice::ble::{gatt_server, peripheral, Connection, Uuid};
+use nrf_softdevice::ble::{gatt_server, peripheral, Connection, SecurityMode, Uuid};
 use nrf_softdevice::raw::sd_ble_gatts_sys_attr_set;
 use nrf_softdevice::{raw, Softdevice};
 use panic_probe as _;
@@ -129,34 +131,6 @@ const HID_REPORT_DESCRIPTOR: &[u8] = hid!(
     (USAGE_MAXIMUM, 0x65), //   USAGE_MAXIMUM (0x65)
     (HIDINPUT, 0x00),  //   INPUT (Data,Array,Abs,No Wrap,Linear,Preferred State,No Null Position)
     (END_COLLECTION),  // END_COLLECTION
-                       // // ------------------------------------------------- Media Keys
-                       // (USAGE_PAGE, 0x0C),         // USAGE_PAGE (Consumer)
-                       // (USAGE, 0x01),              // USAGE (Consumer Control)
-                       // (COLLECTION, 0x01),         // COLLECTION (Application)
-                       // (REPORT_ID, MEDIA_KEYS_ID), //   REPORT_ID (2)
-                       // (USAGE_PAGE, 0x0C),         //   USAGE_PAGE (Consumer)
-                       // (LOGICAL_MINIMUM, 0x00),    //   LOGICAL_MINIMUM (0)
-                       // (LOGICAL_MAXIMUM, 0x01),    //   LOGICAL_MAXIMUM (1)
-                       // (REPORT_SIZE, 0x01),        //   REPORT_SIZE (1)
-                       // (REPORT_COUNT, 0x10),       //   REPORT_COUNT (16)
-                       // (USAGE, 0xB5),              //   USAGE (Scan Next Track)     ; bit 0: 1
-                       // (USAGE, 0xB6),              //   USAGE (Scan Previous Track) ; bit 1: 2
-                       // (USAGE, 0xB7),              //   USAGE (Stop)                ; bit 2: 4
-                       // (USAGE, 0xCD),              //   USAGE (Play/Pause)          ; bit 3: 8
-                       // (USAGE, 0xE2),              //   USAGE (Mute)                ; bit 4: 16
-                       // (USAGE, 0xE9),              //   USAGE (Volume Increment)    ; bit 5: 32
-                       // (USAGE, 0xEA),              //   USAGE (Volume Decrement)    ; bit 6: 64
-                       // (USAGE, 0x23, 0x02),        //   Usage (WWW Home)            ; bit 7: 128
-                       // (USAGE, 0x94, 0x01),        //   Usage (My Computer) ; bit 0: 1
-                       // (USAGE, 0x92, 0x01),        //   Usage (Calculator)  ; bit 1: 2
-                       // (USAGE, 0x2A, 0x02),        //   Usage (WWW fav)     ; bit 2: 4
-                       // (USAGE, 0x21, 0x02),        //   Usage (WWW search)  ; bit 3: 8
-                       // (USAGE, 0x26, 0x02),        //   Usage (WWW stop)    ; bit 4: 16
-                       // (USAGE, 0x24, 0x02),        //   Usage (WWW back)    ; bit 5: 32
-                       // (USAGE, 0x83, 0x01),        //   Usage (Media sel)   ; bit 6: 64
-                       // (USAGE, 0x8A, 0x01),        //   Usage (Mail)        ; bit 7: 128
-                       // (HIDINPUT, 0x02), // INPUT (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position)
-                       // (END_COLLECTION), // END_COLLECTION
 );
 
 #[embassy_executor::task]
@@ -322,48 +296,52 @@ impl HidService {
 
         let hid_info = service_builder.add_characteristic(
             HID_INFO,
-            Attribute::new([0x11u8, 0x1u8, 0x00u8, 0x01u8]),
+            Attribute::new([0x11u8, 0x1u8, 0x00u8, 0x01u8]).security(SecurityMode::JustWorks),
             Metadata::new(Properties::new().read()),
         )?;
         let hid_info_handle = hid_info.build();
 
         let report_map = service_builder.add_characteristic(
             REPORT_MAP,
-            Attribute::new(HID_REPORT_DESCRIPTOR),
+            Attribute::new(HID_REPORT_DESCRIPTOR).security(SecurityMode::JustWorks),
             Metadata::new(Properties::new().read()),
         )?;
         let report_map_handle = report_map.build();
 
         let hid_control = service_builder.add_characteristic(
             HID_CONTROL_POINT,
-            Attribute::new([0u8]),
+            Attribute::new([0u8]).security(SecurityMode::JustWorks),
             Metadata::new(Properties::new().write_without_response()),
         )?;
         let hid_control_handle = hid_control.build();
 
         let protocol_mode = service_builder.add_characteristic(
             PROTOCOL_MODE,
-            Attribute::new([1u8]),
+            Attribute::new([1u8]).security(SecurityMode::JustWorks),
             Metadata::new(Properties::new().read().write_without_response()),
         )?;
         let protocol_mode_handle = protocol_mode.build();
 
         let mut input_keyboard = service_builder.add_characteristic(
             HID_REPORT,
-            Attribute::new([0u8; 8]),
+            Attribute::new([0u8; 8]).security(SecurityMode::JustWorks),
             Metadata::new(Properties::new().read().notify()),
         )?;
-        let input_keyboard_desc =
-            input_keyboard.add_descriptor(Uuid::new_16(0x2908), Attribute::new([1u8]))?; // First is ID (e.g. 1 for keyboard 2 for media keys), second is in/out
+        let input_keyboard_desc = input_keyboard.add_descriptor(
+            Uuid::new_16(0x2908),
+            Attribute::new([1u8, 1u8]).security(SecurityMode::JustWorks),
+        )?; // First is ID (e.g. 1 for keyboard 2 for media keys), second is in/out
         let input_keyboard_handle = input_keyboard.build();
 
         let mut output_keyboard = service_builder.add_characteristic(
             HID_REPORT,
-            Attribute::new([0u8; 8]),
+            Attribute::new([0u8; 8]).security(SecurityMode::JustWorks),
             Metadata::new(Properties::new().read().write().write_without_response()),
         )?;
-        let output_keyboard_desc =
-            output_keyboard.add_descriptor(Uuid::new_16(0x2908), Attribute::new([2u8]))?; // First is ID (e.g. 1 for keyboard 2 for media keys)
+        let output_keyboard_desc = output_keyboard.add_descriptor(
+            Uuid::new_16(0x2908),
+            Attribute::new([1u8, 2u8]).security(SecurityMode::JustWorks),
+        )?; // First is ID (e.g. 1 for keyboard 2 for media keys)
         let output_keyboard_handle = output_keyboard.build();
 
         let _service_handle = service_builder.build();
@@ -389,19 +367,18 @@ impl HidService {
         ];
         if handle == self.input_keyboard_cccd {
             info!("HID input keyboard notify: {:?}", data);
-        } else if handle == self.output_keyboard {
-            // Fires if a keyboard output is changed - e.g. the caps lock LED
-            info!("HID output keyboard: {:?}", data);
-
-            if *data.get(0).unwrap() == 1 {
-                val[2] = 0x04;
-                gatt_server::notify_value(conn, self.input_keyboard, &val).unwrap();
-                info!("Keyboard report sent");
-            } else {
-                gatt_server::notify_value(conn, self.input_keyboard, &[0u8; 8]).unwrap();
-                info!("Keyboard report cleared");
-            }
         }
+    }
+
+    pub fn notify(&self, conn: &Connection, data: &[u8]) {
+        match gatt_server::notify_value(&conn, self.input_keyboard, data) {
+            Ok(_) => {
+                info!("Report Sent!");
+            }
+            Err(e) => {
+                error!("{:?}", e);
+            }
+        };
     }
 }
 
@@ -509,7 +486,7 @@ async fn main(spawner: Spawner) {
     config.time_interrupt_priority = Priority::P2;
     let p = embassy_nrf::init(config);
 
-    let mut led = Output::new(p.P0_15, Level::High, OutputDrive::Standard);
+    let mut led = Output::new(p.P0_15, Level::Low, OutputDrive::Standard);
     let sd = Softdevice::enable(&soft_config);
     let server = unwrap!(Server::new(sd, "12345678"));
     unwrap!(spawner.spawn(softdevice_task(sd)));
@@ -541,8 +518,8 @@ async fn main(spawner: Spawner) {
 
     static SEC: HidSecurityHandler = HidSecurityHandler {};
 
-    let input = Input::new(p.P0_10, Pull::Down);
-    let output = Output::new(p.P1_11, Level::High, OutputDrive::Standard);
+    let input = Input::new(p.P0_02, Pull::Down);
+    let output = Output::new(p.P0_09, Level::High, OutputDrive::Standard);
     loop {
         let config = peripheral::Config::default();
         let adv = peripheral::ConnectableAdvertisement::ScannableUndirected {
@@ -558,39 +535,35 @@ async fn main(spawner: Spawner) {
         // Run the GATT server on the connection. This returns when the connection gets disconnected.
         let e = gatt_server::run(&conn, &server, |_| {});
         let key_loop = async {
-            unsafe { sd_ble_gatts_sys_attr_set(server.hid.input_keyboard, null(), 0, 0) };
-            unsafe { sd_ble_gatts_sys_attr_set(server.hid.input_keyboard_cccd, null(), 0, 0) };
+            Timer::after_secs(2).await;
             let mut rep_sent = false;
-            let mut pressed = true;
+            let mut state = true;
+            let mut val = [
+                0, // Modifiers (Shift, Ctrl, Alt, GUI, etc.)
+                0, // Reserved
+                0x00, 0, 0, 0, 0,
+                0, // Key code array - 0x04 is 'a' and 0x1d is 'z' - for example
+            ];
             loop {
-                if pressed && !rep_sent {
+                if input.is_high() && !rep_sent {
+                    led.set_high();
                     rep_sent = true;
-                    server
-                        .hid
-                        .on_write(&conn, server.hid.output_keyboard, &[1u8]);
-                } else if rep_sent && !pressed {
-                    server
-                        .hid
-                        .on_write(&conn, server.hid.output_keyboard, &[0u8]);
+                    val[2] = 0x04;
+                    server.hid.notify(&conn, &val);
+                } else if rep_sent && input.is_low() {
+                    led.set_low();
+                    val[2] = 0x00;
+                    server.hid.notify(&conn, &val);
                     rep_sent = false;
                 }
-                pressed = !pressed;
-                Timer::after_millis(500).await;
-            }
-        };
-
-        let led_loop = async {
-            let mut state = true;
-            loop {
-                led.set_level(state.into());
                 state = !state;
-                Timer::after_secs(2).await;
+                Timer::after_millis(5).await;
             }
         };
 
-        let res = select3(e, key_loop, led_loop).await;
+        let res = select(e, key_loop).await;
         match res {
-            embassy_futures::select::Either3::First(e) => loop {
+            embassy_futures::select::Either::First(e) => loop {
                 info!("disconnected!")
             },
             _ => loop {
