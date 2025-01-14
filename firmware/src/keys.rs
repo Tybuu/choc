@@ -8,17 +8,20 @@ pub const NUM_LAYERS: usize = 10;
 
 pub const DEBOUNCE_TIME: u64 = 5;
 
+const CENTRAL_NUM_KEYS: usize = 18;
+const PERP_NUM_KEYS: usize = 18;
+
 #[derive(Copy, Clone, Debug)]
 struct Position {
     state: bool,
-    pressed: Option<Instant>,
+    debounced: Option<Instant>,
 }
 
 impl Position {
     const fn default() -> Position {
         Self {
             state: false,
-            pressed: None,
+            debounced: None,
         }
     }
     /// Returns the pressed status of the position
@@ -29,20 +32,23 @@ impl Position {
     /// Updates the buf of the key. Updating the buf will also update
     /// the value returned from the is_pressed function
     fn update_buf(&mut self, buf: bool) {
-        match self.pressed {
+        match self.debounced {
             Some(time) => {
                 if time.elapsed() > Duration::from_millis(DEBOUNCE_TIME) {
-                    self.state = buf;
-                    self.pressed = Some(Instant::now());
+                    self.debounced = None;
                 }
             }
             None => {
-                if buf {
-                    self.pressed = Some(Instant::now());
+                if buf != self.state {
+                    self.debounced = Some(Instant::now());
                     self.state = buf;
                 }
             }
         }
+    }
+
+    fn update_buf_direct(&mut self, buf: bool) {
+        self.state = buf;
     }
 }
 
@@ -132,7 +138,7 @@ struct Key<const S: usize> {
     pos: Position,
     codes: [ScanCodeBehavior<S>; NUM_LAYERS],
     pub current_layer: Option<usize>,
-    reverse: bool,
+    debounce: bool,
 }
 
 impl<const S: usize> Key<S> {
@@ -141,7 +147,7 @@ impl<const S: usize> Key<S> {
             pos: Position::default(),
             codes: [ScanCodeBehavior::Single(ScanCode::Letter(0)); NUM_LAYERS],
             current_layer: None,
-            reverse: false,
+            debounce: true,
         }
     }
 
@@ -156,7 +162,11 @@ impl<const S: usize> Key<S> {
     }
 
     fn update_buf(&mut self, buf: bool) {
-        self.pos.update_buf(buf);
+        if self.debounce {
+            self.pos.update_buf(buf);
+        } else {
+            self.pos.update_buf_direct(buf);
+        }
     }
 
     pub fn is_pressed(&self) -> bool {
@@ -241,10 +251,6 @@ impl<const S: usize> Keys<S> {
         self.keys[index].set_code(layer_code, true, layer);
     }
 
-    pub fn set_reverse(&mut self, val: bool, index: usize) {
-        self.keys[index].reverse = val;
-    }
-
     pub fn set_config(&mut self, f: fn(&mut Keys<S>), index: usize, layer: usize) {
         self.keys[index].codes[layer] = ScanCodeBehavior::Config(f);
     }
@@ -258,12 +264,25 @@ impl<const S: usize> Keys<S> {
         self.keys[index].update_buf(buf);
     }
 
+    /// Updates the indexed key with the provided reading
+    pub fn update_buf_central(&mut self, index: usize, buf: bool) {
+        if index < CENTRAL_NUM_KEYS {
+            self.keys[index].update_buf(buf);
+        }
+    }
+
     /// Returns the indexes of all the keys that are pressed to the vec
     pub fn is_pressed(&self, vec: &mut Vec<usize, S>) {
         for i in 0..S {
             if self.keys[i].pos.is_pressed() {
                 vec.push(i).unwrap();
             }
+        }
+    }
+
+    pub fn set_debounce(&mut self, range: Range<u8>, state: bool) {
+        for i in range {
+            self.keys[i as usize].debounce = state;
         }
     }
 

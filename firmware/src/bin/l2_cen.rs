@@ -1,30 +1,28 @@
 #![no_std]
 #![no_main]
 
-use core::ptr::NonNull;
-use core::sync::atomic::{AtomicBool, AtomicU32};
 use core::{mem, slice};
 
 use bruh78::battery::BatteryVoltage;
 use bruh78::config::load_callum;
 use bruh78::descriptor::KeyboardReportNKRO;
 use bruh78::keys::Keys;
-use bruh78::matrix;
-// use bruh78::matrix::Matrix;
+use bruh78::matrix::Matrix;
 use bruh78::report::Report;
 use defmt::{info, *};
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, select3};
+use embassy_futures::select::{select, select3, Either};
 use embassy_futures::select::{select4, select_array};
+use embassy_nrf::config::HfclkSource;
 use embassy_nrf::gpio::Pin;
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::gpiote::Channel;
 use embassy_nrf::gpiote::InputChannel;
 use embassy_nrf::gpiote::InputChannelPolarity;
 use embassy_nrf::interrupt::{self, InterruptExt, Priority};
-use embassy_nrf::saadc::{self, Gain, Saadc};
+use embassy_nrf::saadc::{Gain, Saadc};
 use embassy_nrf::usb::{self, Driver};
-use embassy_nrf::{self as _, bind_interrupts, peripherals};
+use embassy_nrf::{self as _, bind_interrupts, peripherals, saadc};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel as SyncChannel;
 use embassy_sync::mutex::Mutex;
@@ -50,7 +48,7 @@ use nrf_softdevice::{raw, RawError, Softdevice};
 use defmt_rtt as _; // global logger
 use embassy_nrf as _; // time driver
 use panic_probe as _;
-use usbd_hid::descriptor::SerializedDescriptor;
+use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 const DEVICE_INFORMATION: Uuid = Uuid::new_16(0x180a);
 const BATTERY_SERVICE: Uuid = Uuid::new_16(0x180f);
 
@@ -102,7 +100,6 @@ pub const STRING_MINIMUM: u8 = 0x88;
 pub const STRING_MAXIMUM: u8 = 0x98;
 pub const DELIMITER: u8 = 0xa8;
 
-const UPDATE: AtomicBool = AtomicBool::new(false);
 const KEYBOARD_ID: u8 = 0x01;
 
 #[nrf_softdevice::gatt_client(uuid = "9e7312e0-2354-11eb-9f10-fbc30a62cf38")]
@@ -287,7 +284,7 @@ impl HidService {
 
         let report_map = service_builder.add_characteristic(
             REPORT_MAP,
-            Attribute::new(KeyboardReportNKRO::desc()).security(SecurityMode::JustWorks),
+            Attribute::new(KeyboardReport::desc()).security(SecurityMode::JustWorks),
             Metadata::new(Properties::new().read()),
         )?;
         let report_map_handle = report_map.build();
@@ -308,7 +305,7 @@ impl HidService {
 
         let mut input_keyboard = service_builder.add_characteristic(
             HID_REPORT,
-            Attribute::new([0u8; 29]).security(SecurityMode::JustWorks),
+            Attribute::new([0u8; 8]).security(SecurityMode::JustWorks),
             Metadata::new(Properties::new().read().notify()),
         )?;
         let input_keyboard_desc = input_keyboard.add_descriptor(
@@ -321,7 +318,7 @@ impl HidService {
 
         let mut output_keyboard = service_builder.add_characteristic(
             HID_REPORT,
-            Attribute::new([0u8; 29]).security(SecurityMode::JustWorks),
+            Attribute::new([0u8; 8]).security(SecurityMode::JustWorks),
             Metadata::new(Properties::new().read().write().write_without_response()),
         )?;
         let output_keyboard_desc = output_keyboard.add_descriptor(
@@ -430,7 +427,7 @@ struct HidSecurityHandler {}
 impl SecurityHandler for HidSecurityHandler {}
 
 bind_interrupts!(struct Irqs {
-    SAADC => saadc::InterruptHandler;
+    SAADC => embassy_nrf::saadc::InterruptHandler;
 });
 
 #[embassy_executor::main]
@@ -441,6 +438,7 @@ async fn main(spawner: Spawner) {
     nrf_config.gpiote_interrupt_priority = Priority::P2;
     nrf_config.time_interrupt_priority = Priority::P2;
     let p = embassy_nrf::init(nrf_config);
+
     interrupt::SAADC.set_priority(interrupt::Priority::P3);
 
     let config = nrf_softdevice::Config {
@@ -454,14 +452,14 @@ async fn main(spawner: Spawner) {
             conn_count: 6,
             event_length: 24,
         }),
-        conn_gatt: Some(raw::ble_gatt_conn_cfg_t { att_mtu: 64 }),
+        conn_gatt: Some(raw::ble_gatt_conn_cfg_t { att_mtu: 256 }),
         gatts_attr_tab_size: Some(raw::ble_gatts_cfg_attr_tab_size_t {
             attr_tab_size: raw::BLE_GATTS_ATTR_TAB_SIZE_DEFAULT,
         }),
         gap_role_count: Some(raw::ble_gap_cfg_role_count_t {
             adv_set_count: 1,
-            periph_role_count: 3,
-            central_role_count: 3,
+            periph_role_count: 1,
+            central_role_count: 1,
             central_sec_count: 0,
             _bitfield_1: raw::ble_gap_cfg_role_count_t::new_bitfield_1(0),
         }),
@@ -549,16 +547,15 @@ async fn main(spawner: Spawner) {
     let mut keys = Keys::<39>::default();
     load_callum(&mut keys);
 
-    let mut battery_channel = saadc::ChannelConfig::single_ended(saadc::VddhDiv5Input);
-    battery_channel.gain = Gain::GAIN1_2;
+    let mut battery_channel = saadc::ChannelConfig::single_ended(p.P0_31);
+    battery_channel.gain = Gain::GAIN1;
     let mut saadc = Saadc::new(p.SAADC, Irqs, saadc::Config::default(), [battery_channel]);
-
     let mut battery = BatteryVoltage::new(&mut saadc, 0).await;
 
-    let mut channel = SyncChannel::<CriticalSectionRawMutex, u32, 10>::new();
+    let channel = SyncChannel::<CriticalSectionRawMutex, u32, 10>::new();
     let tx = channel.sender();
     let rx = channel.receiver();
-    // let mut matrix = Matrix::new(columns, rows);
+    let mut matrix = Matrix::new(columns, rows);
     let mut report = Report::default();
     loop {
         info!("start loop");
@@ -570,8 +567,8 @@ async fn main(spawner: Spawner) {
         let mut peer_config = central::ConnectConfig::default();
         peer_config.scan_config.whitelist = Some(&peer_addr);
         peer_config.conn_params.min_conn_interval = 6;
-        peer_config.conn_params.max_conn_interval = 12;
-
+        peer_config.conn_params.max_conn_interval = 6;
+        peer_config.conn_params.slave_latency = 99;
         let peer_conn = central::connect(sd, &peer_config).await.unwrap();
 
         info!("past the connection");
@@ -579,8 +576,7 @@ async fn main(spawner: Spawner) {
         let key_client: KeyClient = gatt_client::discover(&peer_conn).await.unwrap();
         info!("past the discover");
 
-        let mut config = peripheral::Config::default();
-        // config.primary_phy = Phy::M2;
+        let config = peripheral::Config::default();
         let adv = peripheral::ConnectableAdvertisement::ScannableUndirected {
             adv_data: &ADV_DATA,
             scan_data: &SCAN_DATA,
@@ -592,8 +588,8 @@ async fn main(spawner: Spawner) {
 
         conn.set_conn_params(raw::ble_gap_conn_params_t {
             min_conn_interval: 6,
-            max_conn_interval: 12,
-            slave_latency: 0,
+            max_conn_interval: 6,
+            slave_latency: 99,
             conn_sup_timeout: 400,
         })
         .unwrap();
@@ -625,95 +621,54 @@ async fn main(spawner: Spawner) {
         let main_loop = async {
             Timer::after_secs(2).await;
             loop {
-                // for power in &mut columns {
-                //     power.set_high();
-                // }
-                // let mut low = true;
-                // for row in &mut rows {
-                //     if row.is_high().unwrap() {
-                //         low = false;
-                //         break;
-                //     }
-                // }
-                // if low {
-                //     select_array([
-                //         rows[0].wait(),
-                //         rows[1].wait(),
-                //         rows[2].wait(),
-                //         rows[3].wait(),
-                //     ])
-                //     .await;
-                // }
-                // for power in &mut columns {
-                //     power.set_low();
-                // }
-                let mut pressed = false;
-                for i in 0..columns.len() {
-                    columns[i].set_high();
-                    for j in 0..rows.len() {
-                        if j == 3 {
-                            if i > 1 {
-                                let index = j * 5 + i - 2;
-                                let res = rows[j].is_high().unwrap();
-                                pressed = pressed || res;
-                                keys.update_buf(index, res);
-                            }
-                        } else {
-                            let index = j * 5 + i;
-                            let res = rows[j].is_high().unwrap();
-                            pressed = pressed || res;
-                            keys.update_buf(index, res);
+                let mut states = [[false; 5]; 4];
+                match select(matrix.scan(&mut states), rx.receive()).await {
+                    Either::First(_) => {
+                        states[3][0] = states[3][2];
+                        states[3][1] = states[3][3];
+                        states[3][2] = states[3][4];
+                        let iter = states.iter().flatten().into_iter();
+                        let mut index = 0;
+                        for state in iter {
+                            keys.update_buf_central(index, *state);
+                            index += 1;
                         }
+                        match rx.try_receive() {
+                            Ok(val) => {
+                                for i in 0..18 {
+                                    let res = (val >> i) & 1 == 1;
+                                    keys.update_buf(18 + i, res);
+                                }
+                            }
+                            Err(_) => {}
+                        };
                     }
-                    columns[i].set_low();
-                }
-                match rx.try_receive() {
-                    Ok(val) => {
+                    Either::Second(val) => {
                         for i in 0..18 {
                             let res = (val >> i) & 1 == 1;
                             keys.update_buf(18 + i, res);
                         }
                     }
-                    Err(_) => {}
-                };
+                }
                 match report.generate_report(&mut keys) {
                     Some(rep) => {
-                        let mut val = [0u8; 29];
-                        val[0] = rep.modifier;
-                        val[1..29].copy_from_slice(&rep.nkro_keycodes);
+                        let val = [
+                            rep.modifier,
+                            0,
+                            rep.keycodes[0],
+                            rep.keycodes[1],
+                            rep.keycodes[2],
+                            rep.keycodes[3],
+                            rep.keycodes[4],
+                            rep.keycodes[5],
+                        ];
                         server.hid.notify(&conn, &val);
                     }
                     _ => {}
                 };
-                Timer::after_micros(5).await;
+                Timer::after_micros(500).await;
             }
         };
-
-        // let main_loop = async {
-        //     Timer::after_secs(2).await;
-        //     loop {
-        //         let states = matrix.scan().await;
-        //         states[3][0] = states[3][2];
-        //         states[3][1] = states[3][3];
-        //         states[3][2] = states[3][4];
-        //         let iter = states.iter().flatten().into_iter();
-        //         let mut index = 0;
-        //         for state in iter {
-        //             keys.update_buf_central(index, *state);
-        //             index += 1;
-        //         }
-        //         match report.generate_report(&mut keys) {
-        //             Some(rep) => {
-        //                 let mut val = [0u8; 29];
-        //                 val[0] = rep.modifier;
-        //                 val[1..29].copy_from_slice(&rep.nkro_keycodes);
-        //                 server.hid.notify(&conn, &val);
-        //             }
-        //             _ => {}
-        //         };
-        //         Timer::after_micros(500).await;
-        //     }
-        // };
 
         let res = select4(e, e2, main_loop, battery_loop).await;
         // let res = select(e, main_loop).await;

@@ -11,6 +11,7 @@ use bruh78::codes::KeyCodes;
 use bruh78::config::load_callum;
 use bruh78::descriptor::{BufferReport, KeyboardReportNKRO};
 use bruh78::keys::Keys;
+use bruh78::matrix::Matrix;
 use bruh78::report::Report;
 use cortex_m::delay::Delay;
 use defmt::info;
@@ -18,6 +19,7 @@ use embassy_executor::Spawner;
 use embassy_futures::join::{self, join, join3, join4};
 use embassy_futures::yield_now;
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pin, Pull};
+use embassy_nrf::gpiote::{Channel, InputChannel, InputChannelPolarity};
 use embassy_nrf::interrupt::{self, InterruptExt, Priority};
 use embassy_nrf::peripherals::USBD;
 use embassy_nrf::usb::vbus_detect::{HardwareVbusDetect, VbusDetect};
@@ -57,6 +59,7 @@ async fn main(_spawner: Spawner) {
 
     let mut led = Output::new(p.P0_15, Level::Low, OutputDrive::Standard);
 
+    // _spawner.spawn(logger_task(driver)).unwrap();
     // Create embassy-usb Config
     let mut config = Config::new(0xa55, 0xa44);
     config.manufacturer = Some("Tybeast bruh");
@@ -85,7 +88,7 @@ async fn main(_spawner: Spawner) {
     );
 
     let key_config = embassy_usb::class::hid::Config {
-        report_descriptor: KeyboardReportNKRO::desc(),
+        report_descriptor: KeyboardReport::desc(),
         request_handler: None,
         poll_ms: 1,
         max_packet_size: 32,
@@ -114,32 +117,46 @@ async fn main(_spawner: Spawner) {
         Output::new(p.P0_09.degrade(), Level::Low, OutputDrive::Standard),
     ];
 
-    let rows = [
-        Input::new(p.P0_02.degrade(), Pull::Down),
-        Input::new(p.P1_15.degrade(), Pull::Down),
-        Input::new(p.P1_11.degrade(), Pull::Down),
-        Input::new(p.P0_10.degrade(), Pull::Down),
+    let mut rows = [
+        InputChannel::new(
+            p.GPIOTE_CH0.degrade(),
+            Input::new(p.P0_02.degrade(), Pull::Down),
+            InputChannelPolarity::LoToHi,
+        ),
+        InputChannel::new(
+            p.GPIOTE_CH1.degrade(),
+            Input::new(p.P1_15.degrade(), Pull::Down),
+            InputChannelPolarity::LoToHi,
+        ),
+        InputChannel::new(
+            p.GPIOTE_CH2.degrade(),
+            Input::new(p.P1_11.degrade(), Pull::Down),
+            InputChannelPolarity::LoToHi,
+        ),
+        InputChannel::new(
+            p.GPIOTE_CH3.degrade(),
+            Input::new(p.P0_10.degrade(), Pull::Down),
+            InputChannelPolarity::LoToHi,
+        ),
     ];
 
     let mut keys = Keys::<39>::default();
     load_callum(&mut keys);
     let mut report = Report::default();
+
+    let mut matrix = Matrix::new(columns, rows);
     let main_loop = async {
         loop {
-            for i in 0..columns.len() {
-                columns[i].set_high();
-                for j in 0..rows.len() {
-                    if j == 3 {
-                        if i > 1 {
-                            let index = j * 5 + i - 2;
-                            keys.update_buf(index, rows[j].is_high());
-                        }
-                    } else {
-                        let index = j * 5 + i;
-                        keys.update_buf(index, rows[j].is_high());
-                    }
-                }
-                columns[i].set_low();
+            let mut states = [[false; 5]; 4];
+            matrix.scan(&mut states).await;
+            states[3][0] = states[3][2];
+            states[3][1] = states[3][3];
+            states[3][2] = states[3][4];
+            let iter = states.iter().flatten().into_iter();
+            let mut index = 0;
+            for state in iter {
+                keys.update_buf_central(index, *state);
+                index += 1;
             }
             let mut slave_buf = [0u8; 3];
             let slave_keys = MUX.lock().await;
@@ -152,9 +169,10 @@ async fn main(_spawner: Spawner) {
                 keys.update_buf(i + 18, val != 0);
             }
             match report.generate_report(&mut keys) {
-                (Some(rep), _) => key_writer.write_serialize(rep).await.unwrap(),
-                (None, _) => {}
+                Some(rep) => key_writer.write_serialize(rep).await.unwrap(),
+                _ => {}
             }
+
             yield_now().await;
         }
     };

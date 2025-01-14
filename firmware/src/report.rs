@@ -17,16 +17,15 @@ fn set_bit(num: &mut u8, bit: u8, pos: u8) {
 }
 
 pub struct Report {
-    key_report: KeyboardReportNKRO,
+    key_report: KeyboardReport,
     mouse_report: MouseReport,
     current_layer: usize,
     reset_layer: usize,
 }
-
 impl Report {
     pub fn default() -> Self {
         Self {
-            key_report: KeyboardReportNKRO::default(),
+            key_report: KeyboardReport::default(),
             mouse_report: MouseReport::default(),
             current_layer: 0,
             reset_layer: 0,
@@ -38,13 +37,14 @@ impl Report {
     pub fn generate_report<const S: usize>(
         &mut self,
         keys: &mut Keys<S>,
-    ) -> Option<&KeyboardReportNKRO> {
+    ) -> Option<&KeyboardReport> {
         let mut new_layer = None;
         let mut pressed_keys = Vec::<ScanCode, 64>::new();
-        let mut new_key_report = KeyboardReportNKRO::default();
+        let mut new_key_report = KeyboardReport::default();
         let mut new_mouse_report = MouseReport::default();
 
         keys.get_keys(self.current_layer, &mut pressed_keys);
+        let mut index = 0;
         for key in &pressed_keys {
             match key {
                 ScanCode::Modifier(code) => {
@@ -52,9 +52,13 @@ impl Report {
                     set_bit(&mut new_key_report.modifier, 1, b_idx);
                 }
                 ScanCode::Letter(code) => {
-                    let n_idx = (code / 8) as usize;
-                    let b_idx = code % 8;
-                    set_bit(&mut new_key_report.nkro_keycodes[n_idx], 1, b_idx);
+                    // let n_idx = (code / 8) as usize;
+                    // let b_idx = code % 8;
+                    // set_bit(&mut new_key_report.nkro_keycodes[n_idx], 1, b_idx);
+                    if index < 6 {
+                        new_key_report.keycodes[index] = *code;
+                        index += 1;
+                    }
                 }
                 ScanCode::MouseButton(code) => {
                     let b_idx = code % 8;
@@ -93,7 +97,9 @@ impl Report {
                 self.current_layer = self.reset_layer;
             }
         }
-        if self.key_report != new_key_report {
+        if self.key_report.keycodes != new_key_report.keycodes
+            || self.key_report.modifier != new_key_report.modifier
+        {
             self.key_report = new_key_report;
             Some(&self.key_report)
         } else {

@@ -16,7 +16,7 @@ args = [
     "objcopy",
     "--release",
     "--bin",
-    "ble",
+    "l2_cen",
     "--",
     "-O",
     "ihex",
