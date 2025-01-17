@@ -614,7 +614,7 @@ async fn main(spawner: Spawner) {
                     }
                     None => {}
                 }
-                Timer::after_secs(30).await;
+                Timer::after_secs(300).await;
             }
         };
 
@@ -652,6 +652,7 @@ async fn main(spawner: Spawner) {
                 }
                 match report.generate_report(&mut keys) {
                     Some(rep) => {
+                        let mut val = [0u8; 8];
                         let val = [
                             rep.modifier,
                             0,
@@ -666,7 +667,7 @@ async fn main(spawner: Spawner) {
                     }
                     _ => {}
                 };
-                Timer::after_micros(500).await;
+                Timer::after_micros(5).await;
             }
         };
 
