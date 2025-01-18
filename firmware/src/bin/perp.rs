@@ -120,26 +120,10 @@ async fn main(spawner: Spawner) {
     ];
 
     let rows = [
-        InputChannel::new(
-            p.GPIOTE_CH0.degrade(),
-            Input::new(p.P1_00.degrade(), Pull::Down),
-            InputChannelPolarity::LoToHi,
-        ),
-        InputChannel::new(
-            p.GPIOTE_CH1.degrade(),
-            Input::new(p.P0_11.degrade(), Pull::Down),
-            InputChannelPolarity::LoToHi,
-        ),
-        InputChannel::new(
-            p.GPIOTE_CH2.degrade(),
-            Input::new(p.P1_04.degrade(), Pull::Down),
-            InputChannelPolarity::LoToHi,
-        ),
-        InputChannel::new(
-            p.GPIOTE_CH3.degrade(),
-            Input::new(p.P1_06.degrade(), Pull::Down),
-            InputChannelPolarity::LoToHi,
-        ),
+        Input::new(p.P1_00.degrade(), Pull::Down),
+        Input::new(p.P0_11.degrade(), Pull::Down),
+        Input::new(p.P1_04.degrade(), Pull::Down),
+        Input::new(p.P1_06.degrade(), Pull::Down),
     ];
 
     let mut matrix = Matrix::new(columns, rows);
