@@ -1,18 +1,13 @@
 use embassy_nrf::saadc::Saadc;
 
 fn get_percentage(voltage: f32) -> u8 {
-    if voltage <= 3.0 {
-        0
-    } else if voltage <= 3.2 {
-        10
-    } else if voltage <= 3.5 {
-        30
-    } else if voltage <= 3.7 {
-        50
-    } else if voltage <= 4.0 {
-        90
-    } else {
+    let mv = (voltage * 1000f32) as u16;
+    if mv >= 4200 {
         100
+    } else if mv <= 3450 {
+        0
+    } else {
+        ((mv * 2) / 15 - 459) as u8
     }
 }
 

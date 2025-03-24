@@ -30,6 +30,10 @@ embassy-nrf = { version = "0.1.0", features = [
     "nfc-pins-as-gpio",
 ] }
 
+sequential-storage = "*"
+embedded-storage-async = "*"
+
+
 embassy-usb-logger = { version = "*" }
 
 embassy-usb = { version = "*", features = ["defmt"] }

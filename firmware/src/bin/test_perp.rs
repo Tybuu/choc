@@ -1,18 +1,23 @@
 #![no_std]
 #![no_main]
 
+use bruh78::bond::Bonder;
 use bruh78::keys::{Keys, DEBOUNCE_TIME};
 use bruh78::matrix::Matrix;
+use bruh78::storage::{Storage, NRF_FLASH_RANGE};
 use core::mem;
 use core::ptr::NonNull;
 use defmt_rtt as _;
 use embassy_futures::join::join;
-use embassy_futures::select::select;
+use embassy_futures::select::{select, select3};
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pin, Pull};
 use embassy_nrf::gpiote::{Channel, InputChannel, InputChannelPolarity};
 use embassy_nrf::interrupt::Priority;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::mutex::Mutex;
 use embassy_time::{self, Duration, Instant, Timer};
 use nrf_softdevice::ble::gatt_server;
+use static_cell::StaticCell;
 // time driver
 use panic_probe as _;
 
@@ -24,7 +29,7 @@ use nrf_softdevice::ble::advertisement_builder::{
 use nrf_softdevice::ble::{
     gatt_client, peripheral, set_address, set_whitelist, Address, AddressType,
 };
-use nrf_softdevice::{ble, raw, RawError, Softdevice};
+use nrf_softdevice::{ble, raw, Flash, RawError, Softdevice};
 
 #[embassy_executor::task]
 async fn softdevice_task(sd: &'static Softdevice) -> ! {
@@ -38,6 +43,9 @@ struct KeyClient {
     #[characteristic(uuid = "9e7312e0-2354-11eb-9f10-fbc30a63cf39", read, write, notify)]
     mouse_state: u16,
 }
+
+static BONDER: StaticCell<Bonder<Flash>> = StaticCell::new();
+static STORAGE: StaticCell<Storage<Flash, u32>> = StaticCell::new();
 
 #[nrf_softdevice::gatt_server]
 struct Server {
@@ -106,6 +114,8 @@ async fn main(spawner: Spawner) {
     // set_whitelist(sd, &[pair_addr]).unwrap();
     let server = unwrap!(Server::new(sd));
     unwrap!(spawner.spawn(softdevice_task(sd)));
+    let storage: &'static Storage<Flash, u32> =
+        STORAGE.init(Storage::init(Flash::take(&sd), NRF_FLASH_RANGE).await);
 
     static ADV_DATA: LegacyAdvertisementPayload = LegacyAdvertisementBuilder::new()
         .flags(&[Flag::GeneralDiscovery, Flag::LE_Only])
@@ -136,13 +146,14 @@ async fn main(spawner: Spawner) {
     ];
 
     let mut matrix = Matrix::new(columns, rows);
+    let bonder: &'static Bonder<_> = BONDER.init(Bonder::init(&storage).await);
     loop {
         let config = peripheral::Config::default();
         let adv = peripheral::ConnectableAdvertisement::ScannableUndirected {
             adv_data: &ADV_DATA,
             scan_data: &SCAN_DATA,
         };
-        let mut conn = peripheral::advertise_connectable(sd, adv, &config)
+        let mut conn = peripheral::advertise_pairable(sd, adv, &config, bonder)
             .await
             .unwrap();
 
@@ -192,7 +203,7 @@ async fn main(spawner: Spawner) {
         };
         let e = gatt_server::run(&conn, &server, |_| {});
 
-        select(e, main_loop).await;
+        select3(e, main_loop, storage.run_storage()).await;
     }
 }
 

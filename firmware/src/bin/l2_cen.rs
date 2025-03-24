@@ -4,13 +4,15 @@
 use core::{mem, slice};
 
 use bruh78::battery::BatteryVoltage;
+use bruh78::cirque::TrackPad;
 use bruh78::config::load_callum;
-use bruh78::descriptor::KeyboardReportNKRO;
+use bruh78::descriptor::{CombinedReport, KeyboardReportNKRO};
 use bruh78::keys::Keys;
 use bruh78::matrix::Matrix;
 use bruh78::report::Report;
-use defmt::{info, *};
+use defmt::*;
 use embassy_executor::Spawner;
+use embassy_futures::join::join;
 use embassy_futures::select::{select, select3, Either};
 use embassy_futures::select::{select4, select_array};
 use embassy_nrf::config::HfclkSource;
@@ -27,7 +29,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel as SyncChannel;
 use embassy_sync::mutex::Mutex;
 // time driver
-use embassy_time::Timer;
+use embassy_time::{Instant, Timer};
 use embedded_hal::digital::{InputPin, OutputPin};
 use nrf_softdevice::ble::advertisement_builder::{
     AdvertisementDataType, Flag, LegacyAdvertisementBuilder, LegacyAdvertisementPayload,
@@ -48,6 +50,7 @@ use nrf_softdevice::{raw, RawError, Softdevice};
 use defmt_rtt as _; // global logger
 use embassy_nrf as _; // time driver
 use panic_probe as _;
+use serde::Serialize;
 use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 const DEVICE_INFORMATION: Uuid = Uuid::new_16(0x180a);
 const BATTERY_SERVICE: Uuid = Uuid::new_16(0x180f);
@@ -106,12 +109,8 @@ const KEYBOARD_ID: u8 = 0x01;
 struct KeyClient {
     #[characteristic(uuid = "9e7312e0-2354-11eb-9f10-fbc30a63cf38", read, write, notify)]
     state: u32,
-}
-
-#[nrf_softdevice::gatt_service(uuid = "9e7312e0-2354-11eb-9f10-fbc30a62cf38")]
-struct KeyService {
-    #[characteristic(uuid = "9e7312e0-2354-11eb-9f10-fbc30a63cf38", read, write, notify)]
-    state: u32,
+    #[characteristic(uuid = "9e7312e0-2354-11eb-9f10-fbc30a63cf39", read, write, notify)]
+    mouse_state: u16,
 }
 
 #[embassy_executor::task]
@@ -269,6 +268,9 @@ pub struct HidService {
     input_keyboard_descriptor: u16,
     output_keyboard: u16,
     output_keyboard_descriptor: u16,
+    input_mouse: u16,
+    input_mouse_cccd: u16,
+    intput_mouse_descriptor: u16,
 }
 
 impl HidService {
@@ -284,7 +286,7 @@ impl HidService {
 
         let report_map = service_builder.add_characteristic(
             REPORT_MAP,
-            Attribute::new(KeyboardReport::desc()).security(SecurityMode::JustWorks),
+            Attribute::new(CombinedReport::desc()).security(SecurityMode::JustWorks),
             Metadata::new(Properties::new().read()),
         )?;
         let report_map_handle = report_map.build();
@@ -312,8 +314,6 @@ impl HidService {
             Uuid::new_16(0x2908),
             Attribute::new([1u8, 1u8]).security(SecurityMode::JustWorks),
         )?; // First is ID (e.g. 1 for keyboard 2 for media keys), second is in/out
-        let input_keyboard_desc = input_keyboard
-            .add_descriptor(Uuid::new_16(0x2908), Attribute::new([KEYBOARD_ID, 1u8]))?; // First is ID (e.g. 1 for keyboard 2 for media keys), second is in/out
         let input_keyboard_handle = input_keyboard.build();
 
         let mut output_keyboard = service_builder.add_characteristic(
@@ -329,6 +329,19 @@ impl HidService {
             .add_descriptor(Uuid::new_16(0x2908), Attribute::new([KEYBOARD_ID, 2u8]))?; // First is ID (e.g. 1 for keyboard 2 for media keys)
         let output_keyboard_handle = output_keyboard.build();
 
+        let mut input_mouse = service_builder.add_characteristic(
+            HID_REPORT,
+            Attribute::new([0u8; 5]).security(SecurityMode::JustWorks),
+            Metadata::new(Properties::new().read().notify()),
+        )?;
+
+        let input_mouse_desc = input_mouse.add_descriptor(
+            Uuid::new_16(0x2908),
+            Attribute::new([2, 1u8]).security(SecurityMode::JustWorks),
+        )?;
+
+        let input_mouse_handle = input_mouse.build();
+
         let _service_handle = service_builder.build();
 
         Ok(HidService {
@@ -341,6 +354,9 @@ impl HidService {
             input_keyboard_descriptor: input_keyboard_desc.handle(),
             output_keyboard: output_keyboard_handle.value_handle,
             output_keyboard_descriptor: output_keyboard_desc.handle(),
+            input_mouse: input_mouse_handle.value_handle,
+            input_mouse_cccd: input_mouse_handle.cccd_handle,
+            intput_mouse_descriptor: input_mouse_desc.handle(),
         })
     }
 
@@ -357,7 +373,17 @@ impl HidService {
         }
     }
 
-    pub fn notify(&self, conn: &Connection, data: &[u8]) {
+    pub fn mouse_notify(&self, conn: &Connection, data: &[u8]) {
+        match gatt_server::notify_value(&conn, self.input_mouse, data) {
+            Ok(_) => {
+                info!("Report Sent!");
+            }
+            Err(e) => {
+                error!("{:?}", e);
+            }
+        }
+    }
+    pub fn keyboard_notify(&self, conn: &Connection, data: &[u8]) {
         match gatt_server::notify_value(&conn, self.input_keyboard, data) {
             Ok(_) => {
                 info!("Report Sent!");
@@ -424,7 +450,11 @@ impl gatt_server::Server for Server {
 
 struct HidSecurityHandler {}
 
-impl SecurityHandler for HidSecurityHandler {}
+impl SecurityHandler for HidSecurityHandler {
+    fn can_bond(&self, _conn: &Connection) -> bool {
+        false
+    }
+}
 
 bind_interrupts!(struct Irqs {
     SAADC => embassy_nrf::saadc::InterruptHandler;
@@ -464,13 +494,19 @@ async fn main(spawner: Spawner) {
             _bitfield_1: raw::ble_gap_cfg_role_count_t::new_bitfield_1(0),
         }),
         gap_device_name: Some(raw::ble_gap_cfg_device_name_t {
-            p_value: b"HelloRust" as *const u8 as _,
-            current_len: 9,
-            max_len: 9,
+            p_value: b"TybeastL" as *const u8 as _,
+            current_len: 8,
+            max_len: 8,
             write_perm: unsafe { mem::zeroed() },
             _bitfield_1: raw::ble_gap_cfg_device_name_t::new_bitfield_1(
                 raw::BLE_GATTS_VLOC_STACK as u8,
             ),
+        }),
+        conn_gattc: Some(raw::ble_gattc_conn_cfg_t {
+            write_cmd_tx_queue_size: 4,
+        }),
+        conn_gatts: Some(raw::ble_gatts_conn_cfg_t {
+            hvn_tx_queue_size: 4,
         }),
         ..Default::default()
     };
@@ -495,7 +531,7 @@ async fn main(spawner: Spawner) {
                 ServiceUuid16::HUMAN_INTERFACE_DEVICE,
             ],
         )
-        .full_name("HelloRust")
+        .full_name("TybeastL")
         // Change the appearance (icon of the bluetooth device) to a keyboard
         .raw(AdvertisementDataType::APPEARANCE, &[0xC1, 0x03])
         .build();
@@ -566,28 +602,48 @@ async fn main(spawner: Spawner) {
             scan_data: &SCAN_DATA,
         };
 
-        let conn = peripheral::advertise_connectable(sd, adv, &config)
+        let mut conn = peripheral::advertise_pairable(sd, adv, &config, &SEC)
             .await
             .unwrap();
 
-        conn.set_conn_params(raw::ble_gap_conn_params_t {
+        match conn.set_conn_params(raw::ble_gap_conn_params_t {
             min_conn_interval: 6,
             max_conn_interval: 6,
             slave_latency: 99,
             conn_sup_timeout: 400,
-        })
-        .unwrap();
-        info!("advertising done!");
+        }) {
+            Ok(_) => {}
+            Err(_) => {
+                led.set_high();
+            }
+        }
+        // match conn.phy_update(
+        //     nrf_softdevice::ble::PhySet::M2,
+        //     nrf_softdevice::ble::PhySet::M2,
+        // ) {
+        //     Ok(_) => {}
+        //     Err(_) => {
+        //         led.set_high();
+        //     }
+        // }
 
         // Run the GATT server on the connection. This returns when the connection gets disconnected.
         let e = gatt_server::run(&conn, &server, |_| {});
 
         key_client.state_cccd_write(true).await.unwrap();
+        key_client.mouse_state_cccd_write(true).await.unwrap();
         let e2 = gatt_client::run(&peer_conn, &key_client, |event| match event {
             KeyClientEvent::StateNotification(val) => match tx.try_send(val) {
                 Ok(_) => {}
                 Err(_) => {}
             },
+            KeyClientEvent::MouseStateNotification(val) => {
+                let x = ((val & 0xFF00) >> 8) as u8;
+                let y = (val & 0xFF) as u8;
+
+                let buf = [0u8, x, y, 0, 0];
+                server.hid.mouse_notify(&conn, &buf);
+            }
         });
 
         let battery_loop = async {
@@ -598,7 +654,7 @@ async fn main(spawner: Spawner) {
                     }
                     None => {}
                 }
-                Timer::after_secs(300).await;
+                Timer::after_secs(60).await;
             }
         };
 
@@ -634,9 +690,9 @@ async fn main(spawner: Spawner) {
                         }
                     }
                 }
-                match report.generate_report(&mut keys) {
+                let (key, mouse) = report.generate_report(&mut keys);
+                match key {
                     Some(rep) => {
-                        let mut val = [0u8; 8];
                         let val = [
                             rep.modifier,
                             0,
@@ -647,10 +703,23 @@ async fn main(spawner: Spawner) {
                             rep.keycodes[4],
                             rep.keycodes[5],
                         ];
-                        server.hid.notify(&conn, &val);
+                        server.hid.keyboard_notify(&conn, &val);
                     }
                     _ => {}
                 };
+                match mouse {
+                    Some(rep) => {
+                        let buf = [
+                            rep.buttons,
+                            rep.x as u8,
+                            rep.y as u8,
+                            rep.wheel as u8,
+                            rep.pan as u8,
+                        ];
+                        server.hid.mouse_notify(&conn, &buf);
+                    }
+                    None => {}
+                }
                 Timer::after_micros(5).await;
             }
         };

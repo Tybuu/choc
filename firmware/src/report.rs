@@ -1,4 +1,4 @@
-use embassy_time::Instant;
+use embassy_time::{Duration, Instant};
 use heapless::{FnvIndexSet, Vec};
 use usbd_hid::descriptor::KeyboardReport;
 
@@ -19,6 +19,7 @@ fn set_bit(num: &mut u8, bit: u8, pos: u8) {
 pub struct Report {
     key_report: KeyboardReport,
     mouse_report: MouseReport,
+    last_report_time: Instant,
     current_layer: usize,
     reset_layer: usize,
 }
@@ -27,6 +28,7 @@ impl Report {
         Self {
             key_report: KeyboardReport::default(),
             mouse_report: MouseReport::default(),
+            last_report_time: Instant::now(),
             current_layer: 0,
             reset_layer: 0,
         }
@@ -37,7 +39,7 @@ impl Report {
     pub fn generate_report<const S: usize>(
         &mut self,
         keys: &mut Keys<S>,
-    ) -> Option<&KeyboardReport> {
+    ) -> (Option<&KeyboardReport>, Option<&MouseReport>) {
         let mut new_layer = None;
         let mut pressed_keys = Vec::<ScanCode, 64>::new();
         let mut new_key_report = KeyboardReport::default();
@@ -65,10 +67,10 @@ impl Report {
                     set_bit(&mut new_mouse_report.buttons, 1, b_idx);
                 }
                 ScanCode::MouseX(code) => {
-                    new_mouse_report.x += code;
+                    new_mouse_report.x += code * 10;
                 }
                 ScanCode::MouseY(code) => {
-                    new_mouse_report.y += code;
+                    new_mouse_report.y += code * 10;
                 }
                 ScanCode::Scroll(code) => {
                     new_mouse_report.wheel += code;
@@ -97,13 +99,24 @@ impl Report {
                 self.current_layer = self.reset_layer;
             }
         }
+        let mut key_report = None;
+        let mut mouse_report = None;
         if self.key_report.keycodes != new_key_report.keycodes
             || self.key_report.modifier != new_key_report.modifier
         {
             self.key_report = new_key_report;
-            Some(&self.key_report)
-        } else {
-            None
+            key_report = Some(&self.key_report)
         }
+        if (self.mouse_report.buttons != new_mouse_report.buttons
+            || new_mouse_report.x != 0
+            || new_mouse_report.y != 0
+            || new_mouse_report.wheel != 0)
+            && self.last_report_time.elapsed() >= Duration::from_millis(20)
+        {
+            self.last_report_time = Instant::now();
+            self.mouse_report = new_mouse_report;
+            mouse_report = Some(&self.mouse_report);
+        }
+        (key_report, mouse_report)
     }
 }

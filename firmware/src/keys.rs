@@ -6,7 +6,7 @@ use heapless::Vec;
 use crate::codes::KeyCodes;
 pub const NUM_LAYERS: usize = 10;
 
-pub const DEBOUNCE_TIME: u64 = 5;
+pub const DEBOUNCE_TIME: u64 = 6;
 
 const CENTRAL_NUM_KEYS: usize = 18;
 const PERP_NUM_KEYS: usize = 18;

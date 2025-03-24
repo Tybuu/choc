@@ -14,7 +14,7 @@ use bruh78::keys::Keys;
 use bruh78::matrix::Matrix;
 use bruh78::report::Report;
 use cortex_m::delay::Delay;
-use defmt::info;
+use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::join::{self, join, join3, join4};
 use embassy_futures::yield_now;
@@ -59,7 +59,6 @@ async fn main(_spawner: Spawner) {
 
     let mut led = Output::new(p.P0_15, Level::Low, OutputDrive::Standard);
 
-    // _spawner.spawn(logger_task(driver)).unwrap();
     // Create embassy-usb Config
     let mut config = Config::new(0xa55, 0xa44);
     config.manufacturer = Some("Tybeast bruh");
@@ -118,26 +117,10 @@ async fn main(_spawner: Spawner) {
     ];
 
     let mut rows = [
-        InputChannel::new(
-            p.GPIOTE_CH0.degrade(),
-            Input::new(p.P0_02.degrade(), Pull::Down),
-            InputChannelPolarity::LoToHi,
-        ),
-        InputChannel::new(
-            p.GPIOTE_CH1.degrade(),
-            Input::new(p.P1_15.degrade(), Pull::Down),
-            InputChannelPolarity::LoToHi,
-        ),
-        InputChannel::new(
-            p.GPIOTE_CH2.degrade(),
-            Input::new(p.P1_11.degrade(), Pull::Down),
-            InputChannelPolarity::LoToHi,
-        ),
-        InputChannel::new(
-            p.GPIOTE_CH3.degrade(),
-            Input::new(p.P0_10.degrade(), Pull::Down),
-            InputChannelPolarity::LoToHi,
-        ),
+        Input::new(p.P0_02.degrade(), Pull::Down),
+        Input::new(p.P1_15.degrade(), Pull::Down),
+        Input::new(p.P1_11.degrade(), Pull::Down),
+        Input::new(p.P0_10.degrade(), Pull::Down),
     ];
 
     let mut keys = Keys::<39>::default();
@@ -169,7 +152,7 @@ async fn main(_spawner: Spawner) {
                 keys.update_buf(i + 18, val != 0);
             }
             match report.generate_report(&mut keys) {
-                Some(rep) => key_writer.write_serialize(rep).await.unwrap(),
+                (Some(rep), _) => key_writer.write_serialize(rep).await.unwrap(),
                 _ => {}
             }
 
