@@ -13,5 +13,5 @@ target/
 !.vscode/extensions.json
 !.vscode/settings.json
 
-.hex
-.uf2
+*.hex
+*.uf2
