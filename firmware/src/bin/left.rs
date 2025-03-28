@@ -33,9 +33,6 @@ use embassy_nrf as _; // time driver
 use panic_probe as _;
 use static_cell::StaticCell;
 
-static BONDER: StaticCell<Bonder<Flash>> = StaticCell::new();
-static STORAGE: StaticCell<Storage<Flash, u32>> = StaticCell::new();
-
 #[embassy_executor::task]
 async fn softdevice_task(sd: &'static Softdevice) -> ! {
     sd.run().await
@@ -105,8 +102,6 @@ async fn main(spawner: Spawner) {
     set_address(sd, &addr);
     let central = BleCentral::init(sd);
     unwrap!(spawner.spawn(softdevice_task(sd)));
-    let storage: &'static Storage<Flash, u32> =
-        STORAGE.init(Storage::init(Flash::take(&sd), NRF_FLASH_RANGE).await);
 
     let columns = [
         Output::new(p.P1_00.degrade(), Level::Low, OutputDrive::Standard),
@@ -116,7 +111,7 @@ async fn main(spawner: Spawner) {
         Output::new(p.P0_09.degrade(), Level::Low, OutputDrive::Standard),
     ];
 
-    let mut rows = [
+    let rows = [
         Input::new(p.P0_02.degrade(), Pull::Down),
         Input::new(p.P1_15.degrade(), Pull::Down),
         Input::new(p.P1_11.degrade(), Pull::Down),
@@ -137,10 +132,7 @@ async fn main(spawner: Spawner) {
     let mut matrix = Matrix::new(columns, rows);
     let mut report = Report::default();
 
-    let sd: &'static Softdevice = &*sd;
-
     let mut link = Link::new(tx);
-    let bonder: &'static Bonder<_> = BONDER.init(Bonder::init(storage).await);
 
     loop {
         info!("start loop");
@@ -205,7 +197,7 @@ async fn main(spawner: Spawner) {
             }
         };
 
-        let cen_server = central.advertise_and_connect(bonder);
+        let cen_server = central.connect();
         let pair_addr = Address::new(
             AddressType::RandomStatic,
             [0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0b11111111u8],

@@ -3,6 +3,7 @@
 
 use bruh78::keys::{Keys, DEBOUNCE_TIME};
 use bruh78::matrix::Matrix;
+use bruh78::split::peripheral::BlePeripheral;
 use core::mem;
 use core::ptr::NonNull;
 use defmt_rtt as _;
@@ -97,30 +98,12 @@ async fn main(spawner: Spawner) {
         AddressType::RandomStatic,
         [0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0b11111111u8],
     );
-    let pair_addr = Address::new(
-        AddressType::RandomStatic,
-        [0x72u8, 0x72u8, 0x72u8, 0x72u8, 0x72u8, 0u8],
-    );
     let sd = Softdevice::enable(&config);
     set_address(sd, &self_addr);
-    // set_whitelist(sd, &[pair_addr]).unwrap();
-    let server = unwrap!(Server::new(sd));
+    let peripheral = BlePeripheral::init(sd);
     unwrap!(spawner.spawn(softdevice_task(sd)));
 
-    static ADV_DATA: LegacyAdvertisementPayload = LegacyAdvertisementBuilder::new()
-        .flags(&[Flag::GeneralDiscovery, Flag::LE_Only])
-        .services_128(
-            ServiceList::Complete,
-            &[0x9e7312e0_2354_11eb_9f10_fbc30a62cf38_u128.to_le_bytes()],
-        )
-        .full_name("TybeastR")
-        .build();
-
-    static SCAN_DATA: [u8; 0] = [];
-
-    let mut led = Output::new(p.P0_15, Level::Low, OutputDrive::Standard);
-
-    let mut columns = [
+    let columns = [
         Output::new(p.P0_09.degrade(), Level::Low, OutputDrive::Standard),
         Output::new(p.P0_10.degrade(), Level::Low, OutputDrive::Standard),
         Output::new(p.P1_11.degrade(), Level::Low, OutputDrive::Standard),
@@ -136,99 +119,29 @@ async fn main(spawner: Spawner) {
     ];
 
     let mut matrix = Matrix::new(columns, rows);
+    let mut keys = Keys::<18>::default();
     loop {
-        let config = peripheral::Config::default();
-        let adv = peripheral::ConnectableAdvertisement::ScannableUndirected {
-            adv_data: &ADV_DATA,
-            scan_data: &SCAN_DATA,
-        };
-        let mut conn = peripheral::advertise_connectable(sd, adv, &config)
-            .await
-            .unwrap();
-
-        info!("advertising done!");
-
-        match conn.phy_update(
-            nrf_softdevice::ble::PhySet::M2,
-            nrf_softdevice::ble::PhySet::M2,
-        ) {
-            Ok(_) => {}
-            Err(_) => {
-                led.set_high();
-            }
-        }
-        let mut key_state = 0u32;
-        let mut key_states = [Debouncer::default(); 18];
         let main_loop = async {
             Timer::after_secs(1).await;
+            let mut current_state = 0u32;
             loop {
-                let mut current_state = 0u32;
                 let mut states = [[false; 5]; 4];
                 matrix.scan(&mut states).await;
                 let iter = states.iter().flatten().into_iter();
                 let mut index = 0;
                 for state in iter {
                     if index < 18 {
-                        key_states[index].update_buf(*state);
+                        keys.update_buf(index, *state);
                         index += 1;
                     }
                 }
-                for i in 0..key_states.len() {
-                    if key_states[i].is_pressed() {
-                        current_state |= 1 << i;
-                    } else {
-                        current_state &= !(1 << i);
-                    }
-                }
-                if key_state != current_state {
-                    key_state = current_state;
-                    match server.key_client.state_notify(&conn, &key_state) {
-                        Ok(_) => info!("report sent"),
-                        Err(e) => error!("{:?}", e),
-                    }
+                if keys.get_states() != current_state {
+                    current_state = keys.get_states();
+                    peripheral.state_notify(current_state).await;
                 }
                 Timer::after_micros(5).await;
             }
         };
-        let e = gatt_server::run(&conn, &server, |_| {});
-
-        select(e, main_loop).await;
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
-struct Debouncer {
-    state: bool,
-    debounced: Option<Instant>,
-}
-
-impl Debouncer {
-    const fn default() -> Debouncer {
-        Self {
-            state: false,
-            debounced: None,
-        }
-    }
-    /// Returns the pressed status of the position
-    fn is_pressed(&self) -> bool {
-        self.state
-    }
-
-    /// Updates the buf of the key. Updating the buf will also update
-    /// the value returned from the is_pressed function
-    fn update_buf(&mut self, buf: bool) {
-        match self.debounced {
-            Some(time) => {
-                if time.elapsed() > Duration::from_millis(DEBOUNCE_TIME) {
-                    self.debounced = None;
-                }
-            }
-            None => {
-                if buf != self.state {
-                    self.debounced = Some(Instant::now());
-                    self.state = buf;
-                }
-            }
-        }
+        select(peripheral.connect(), main_loop).await;
     }
 }

@@ -45,6 +45,7 @@ impl Debouncer {
         }
     }
 }
+
 pub struct Matrix<'a, const INPUT_SIZE: usize, const OUTPUT_SIZE: usize> {
     out: [Output<'a, AnyPin>; OUTPUT_SIZE],
     input: [Input<'a, AnyPin>; INPUT_SIZE],
@@ -101,8 +102,8 @@ impl<'a, const INPUT_SIZE: usize, const OUTPUT_SIZE: usize> Matrix<'a, INPUT_SIZ
         for i in 0..OUTPUT_SIZE {
             self.out[i].set_high();
             for j in 0..INPUT_SIZE {
-                states[j][i] = self.input[j].is_high();
-                pressed = pressed || states[j][i];
+                self.debouncers[j][i].update_buf(self.input[j].is_high());
+                pressed = pressed || self.debouncers[j][i].is_pressed();
             }
             self.out[i].set_low();
         }
@@ -114,6 +115,11 @@ impl<'a, const INPUT_SIZE: usize, const OUTPUT_SIZE: usize> Matrix<'a, INPUT_SIZ
                 None => {
                     self.pressed = Some(Instant::now());
                 }
+            }
+        }
+        for i in 0..INPUT_SIZE {
+            for j in 0..OUTPUT_SIZE {
+                states[i][j] = self.debouncers[i][j].is_pressed();
             }
         }
     }

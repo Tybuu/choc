@@ -315,7 +315,6 @@ pub fn load_callum<const S: usize>(keys: &mut Keys<S>) {
     );
 
     keys.set_config(load_colemak, 5, 4);
-    keys.set_debounce(18..36, false);
 }
 
 pub fn load_colemak<const S: usize>(keys: &mut Keys<S>) {
@@ -600,5 +599,4 @@ pub fn load_colemak<const S: usize>(keys: &mut Keys<S>) {
 
     // Layer 4
     keys.set_config(load_callum, 15, 4);
-    keys.set_debounce(18..36, false);
 }

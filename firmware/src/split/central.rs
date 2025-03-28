@@ -5,8 +5,10 @@ use core::{
 };
 
 use defmt::{error, info};
+use embassy_futures::select::select;
 use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex, signal::Signal, watch::Watch,
+    blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, mutex::Mutex, signal::Signal,
+    watch::Watch,
 };
 use embedded_storage_async::nor_flash::NorFlash;
 use nrf_softdevice::{
@@ -378,10 +380,15 @@ impl gatt_server::Server for Server {
         None
     }
 }
+enum Message {
+    Keyboard(KeyboardReport),
+    Mouse(MouseReport),
+    Battery(u8),
+}
 
 pub struct BleCentral {
     server: Server,
-    conn: RefCell<Option<Connection>>,
+    channel: Channel<CriticalSectionRawMutex, Message, 20>,
     status: Mutex<CriticalSectionRawMutex, bool>,
 }
 
@@ -390,12 +397,18 @@ impl BleCentral {
         let server = Server::new(sd, "12345678").unwrap();
         Self {
             server,
-            conn: RefCell::new(None),
+            channel: Channel::new(),
             status: Mutex::new(false),
         }
     }
 
-    pub async fn advertise_and_connect<S: NorFlash>(&self, bonder: &'static Bonder<'_, S>) {
+    pub async fn clear(&self) {
+        self.channel.clear();
+        let mut status = self.status.lock().await;
+        *status = false;
+    }
+
+    pub async fn connect(&self) {
         static ADV_DATA: LegacyAdvertisementPayload = LegacyAdvertisementBuilder::new()
             .flags(&[Flag::GeneralDiscovery, Flag::LE_Only])
             .services_16(
@@ -432,70 +445,77 @@ impl BleCentral {
         let conn = peripheral::advertise_connectable(sd, adv, &config)
             .await
             .unwrap();
-
         {
             let mut status = self.status.lock().await;
             *status = true;
-            let mut con_status = self.conn.borrow_mut();
-            let conn = con_status.insert(conn);
-            conn.set_conn_params(raw::ble_gap_conn_params_t {
-                min_conn_interval: 6,
-                max_conn_interval: 6,
-                slave_latency: 99,
-                conn_sup_timeout: 400,
-            })
-            .unwrap();
         }
-
-        gatt_server::run(self.conn.borrow().as_ref().unwrap(), &self.server, |_| {}).await;
+        let res = gatt_server::run(&conn, &self.server, |_| {});
+        let report_handle = async {
+            loop {
+                match self.channel.receiver().receive().await {
+                    Message::Keyboard(rep) => {
+                        let val = [
+                            rep.modifier,
+                            0,
+                            rep.keycodes[0],
+                            rep.keycodes[1],
+                            rep.keycodes[2],
+                            rep.keycodes[3],
+                            rep.keycodes[4],
+                            rep.keycodes[5],
+                        ];
+                        self.server.hid.keyboard_notify(&conn, &val);
+                    }
+                    Message::Mouse(rep) => {
+                        let buf = [
+                            rep.buttons,
+                            rep.x as u8,
+                            rep.y as u8,
+                            rep.wheel as u8,
+                            rep.pan as u8,
+                        ];
+                        self.server.hid.mouse_notify(&conn, &buf);
+                    }
+                    Message::Battery(percentage) => {
+                        self.server.bas.battery_level_notify(&conn, percentage);
+                    }
+                }
+            }
+        };
+        select(res, report_handle).await;
         {
             let mut status = self.status.lock().await;
             *status = false;
-            self.conn.replace(None);
         }
     }
 
     pub async fn keyboard_notify(&self, rep: &KeyboardReport) {
         let active = self.status.lock().await;
         if *active {
-            if let Some(conn) = self.conn.borrow().as_ref() {
-                let val = [
-                    rep.modifier,
-                    0,
-                    rep.keycodes[0],
-                    rep.keycodes[1],
-                    rep.keycodes[2],
-                    rep.keycodes[3],
-                    rep.keycodes[4],
-                    rep.keycodes[5],
-                ];
-                self.server.hid.keyboard_notify(conn, &val);
-            }
+            self.channel
+                .sender()
+                .send(Message::Keyboard(rep.clone()))
+                .await;
         }
     }
 
     pub async fn mouse_notify(&self, rep: &MouseReport) {
         let active = self.status.lock().await;
         if *active {
-            if let Some(conn) = self.conn.borrow().as_ref() {
-                let buf = [
-                    rep.buttons,
-                    rep.x as u8,
-                    rep.y as u8,
-                    rep.wheel as u8,
-                    rep.pan as u8,
-                ];
-                self.server.hid.mouse_notify(conn, &buf);
-            }
+            self.channel
+                .sender()
+                .send(Message::Mouse(rep.clone()))
+                .await;
         }
     }
 
     pub async fn battery_notify(&self, percentage: u8) {
         let active = self.status.lock().await;
         if *active {
-            if let Some(conn) = self.conn.borrow().as_ref() {
-                self.server.bas.battery_level_notify(conn, percentage);
-            }
+            self.channel
+                .sender()
+                .send(Message::Battery(percentage))
+                .await;
         }
     }
 }

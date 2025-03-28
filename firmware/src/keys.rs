@@ -3,7 +3,7 @@ use core::{borrow::BorrowMut, ops::Range};
 use embassy_time::{Duration, Instant};
 use heapless::Vec;
 
-use crate::codes::KeyCodes;
+use crate::{codes::KeyCodes, split::dual::DualMode};
 pub const NUM_LAYERS: usize = 10;
 
 pub const DEBOUNCE_TIME: u64 = 6;
@@ -29,25 +29,7 @@ impl Position {
         self.state
     }
 
-    /// Updates the buf of the key. Updating the buf will also update
-    /// the value returned from the is_pressed function
     fn update_buf(&mut self, buf: bool) {
-        match self.debounced {
-            Some(time) => {
-                if time.elapsed() > Duration::from_millis(DEBOUNCE_TIME) {
-                    self.debounced = None;
-                }
-            }
-            None => {
-                if buf != self.state {
-                    self.debounced = Some(Instant::now());
-                    self.state = buf;
-                }
-            }
-        }
-    }
-
-    fn update_buf_direct(&mut self, buf: bool) {
         self.state = buf;
     }
 }
@@ -138,7 +120,6 @@ struct Key<const S: usize> {
     pos: Position,
     codes: [ScanCodeBehavior<S>; NUM_LAYERS],
     pub current_layer: Option<usize>,
-    debounce: bool,
 }
 
 impl<const S: usize> Key<S> {
@@ -147,7 +128,6 @@ impl<const S: usize> Key<S> {
             pos: Position::default(),
             codes: [ScanCodeBehavior::Single(ScanCode::Letter(0)); NUM_LAYERS],
             current_layer: None,
-            debounce: true,
         }
     }
 
@@ -162,11 +142,7 @@ impl<const S: usize> Key<S> {
     }
 
     fn update_buf(&mut self, buf: bool) {
-        if self.debounce {
-            self.pos.update_buf(buf);
-        } else {
-            self.pos.update_buf_direct(buf);
-        }
+        self.pos.update_buf(buf);
     }
 
     pub fn is_pressed(&self) -> bool {
@@ -177,6 +153,7 @@ impl<const S: usize> Key<S> {
 #[derive(Copy, Clone, Debug)]
 pub struct Keys<const S: usize> {
     keys: [Key<S>; S],
+    state: u32,
 }
 
 enum PressResult {
@@ -189,11 +166,16 @@ impl<const S: usize> Keys<S> {
     pub const fn default() -> Self {
         Self {
             keys: [Key::default(); S],
+            state: 0,
         }
     }
 
     pub fn get_pressed(&self, index: usize) -> bool {
         self.keys[index].pos.is_pressed()
+    }
+
+    pub fn get_states(&self) -> u32 {
+        self.state
     }
 
     /// Sets the code on the passed in layer on the indexed key. Returns
@@ -262,12 +244,19 @@ impl<const S: usize> Keys<S> {
     /// Updates the indexed key with the provided reading
     pub fn update_buf(&mut self, index: usize, buf: bool) {
         self.keys[index].update_buf(buf);
+        if index < CENTRAL_NUM_KEYS {
+            if buf {
+                self.state |= 1 << index;
+            } else {
+                self.state &= !(1 << index);
+            }
+        }
     }
 
     /// Updates the indexed key with the provided reading
     pub fn update_buf_central(&mut self, index: usize, buf: bool) {
         if index < CENTRAL_NUM_KEYS {
-            self.keys[index].update_buf(buf);
+            self.update_buf(index, buf);
         }
     }
 
@@ -277,12 +266,6 @@ impl<const S: usize> Keys<S> {
             if self.keys[i].pos.is_pressed() {
                 vec.push(i).unwrap();
             }
-        }
-    }
-
-    pub fn set_debounce(&mut self, range: Range<u8>, state: bool) {
-        for i in range {
-            self.keys[i as usize].debounce = state;
         }
     }
 

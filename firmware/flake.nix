@@ -6,7 +6,7 @@
     rust-overlay.url = "github:oxalica/rust-overlay";
     flake-utils.url = "github:numtide/flake-utils";
   };
-
+  #
   outputs = {
     self,
     nixpkgs,
@@ -20,6 +20,7 @@
         pkgs = import nixpkgs {
           inherit system overlays;
         };
+        services = import flake-utils.services;
       in {
         devShells.default = with pkgs;
           mkShell {
@@ -36,6 +37,8 @@
                 })
             ];
           };
+
+        services.udev.extraRules = builtins.readFile "./69-probe-rs.rules";
       }
     );
 }
