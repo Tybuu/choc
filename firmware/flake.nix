@@ -27,6 +27,8 @@
               openssl
               pkg-config
               cargo-binutils
+              cargo-make
+              probe-rs
               (rust-bin.stable.latest.default.override
                 {
                   extensions = ["rust-src" "rust-analyzer" "llvm-tools"];

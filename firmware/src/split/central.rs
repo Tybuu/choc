@@ -434,6 +434,8 @@ impl BleCentral {
             .unwrap();
 
         {
+            let mut status = self.status.lock().await;
+            *status = true;
             let mut con_status = self.conn.borrow_mut();
             let conn = con_status.insert(conn);
             conn.set_conn_params(raw::ble_gap_conn_params_t {
@@ -443,22 +445,20 @@ impl BleCentral {
                 conn_sup_timeout: 400,
             })
             .unwrap();
-            let mut status = self.status.lock().await;
-            *status = true;
         }
 
         gatt_server::run(self.conn.borrow().as_ref().unwrap(), &self.server, |_| {}).await;
         {
-            self.conn.replace(None);
             let mut status = self.status.lock().await;
             *status = false;
+            self.conn.replace(None);
         }
     }
 
     pub async fn keyboard_notify(&self, rep: &KeyboardReport) {
         let active = self.status.lock().await;
         if *active {
-            if let Some(conn) = self.conn.borrow().clone() {
+            if let Some(conn) = self.conn.borrow().as_ref() {
                 let val = [
                     rep.modifier,
                     0,
@@ -469,7 +469,7 @@ impl BleCentral {
                     rep.keycodes[4],
                     rep.keycodes[5],
                 ];
-                self.server.hid.keyboard_notify(&conn, &val);
+                self.server.hid.keyboard_notify(conn, &val);
             }
         }
     }
@@ -477,7 +477,7 @@ impl BleCentral {
     pub async fn mouse_notify(&self, rep: &MouseReport) {
         let active = self.status.lock().await;
         if *active {
-            if let Some(conn) = self.conn.borrow().clone() {
+            if let Some(conn) = self.conn.borrow().as_ref() {
                 let buf = [
                     rep.buttons,
                     rep.x as u8,
@@ -485,7 +485,7 @@ impl BleCentral {
                     rep.wheel as u8,
                     rep.pan as u8,
                 ];
-                self.server.hid.mouse_notify(&conn, &buf);
+                self.server.hid.mouse_notify(conn, &buf);
             }
         }
     }
@@ -493,8 +493,8 @@ impl BleCentral {
     pub async fn battery_notify(&self, percentage: u8) {
         let active = self.status.lock().await;
         if *active {
-            if let Some(conn) = self.conn.borrow().clone() {
-                self.server.bas.battery_level_notify(&conn, percentage);
+            if let Some(conn) = self.conn.borrow().as_ref() {
+                self.server.bas.battery_level_notify(conn, percentage);
             }
         }
     }
