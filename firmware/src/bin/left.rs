@@ -96,17 +96,14 @@ async fn main(spawner: Spawner) {
         ..Default::default()
     };
 
-    let mut led = Output::new(p.P0_15, Level::Low, OutputDrive::Standard);
-    let mut sd: &'static mut Softdevice = Softdevice::enable(&config);
+    let sd: &'static mut Softdevice = Softdevice::enable(&config);
 
     let addr = Address::new(
         AddressType::RandomStatic,
         [0x72u8, 0x72u8, 0x72u8, 0x72u8, 0x72u8, 0b11111111u8],
     );
     set_address(sd, &addr);
-    let mut central = BleCentral::init(&mut sd);
-
-    let sd = &*sd;
+    let central = BleCentral::init(sd);
     unwrap!(spawner.spawn(softdevice_task(sd)));
     let storage: &'static Storage<Flash, u32> =
         STORAGE.init(Storage::init(Flash::take(&sd), NRF_FLASH_RANGE).await);
@@ -147,7 +144,6 @@ async fn main(spawner: Spawner) {
 
     loop {
         info!("start loop");
-        central.advertise(bonder).await;
         let battery_loop = async {
             loop {
                 match battery.update_reading().await {
@@ -209,7 +205,7 @@ async fn main(spawner: Spawner) {
             }
         };
 
-        let cen_server = central.connect();
+        let cen_server = central.advertise_and_connect(bonder);
         let pair_addr = Address::new(
             AddressType::RandomStatic,
             [0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0b11111111u8],

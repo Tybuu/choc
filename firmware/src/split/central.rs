@@ -1,4 +1,8 @@
-use core::{borrow::Borrow, cell::RefCell};
+use core::{
+    borrow::Borrow,
+    cell::{Ref, RefCell},
+    ops::Deref,
+};
 
 use defmt::{error, info};
 use embassy_sync::{
@@ -374,35 +378,16 @@ impl gatt_server::Server for Server {
         None
     }
 }
-struct RwLockInner<T> {
-    data: T,
-    writer_watch: Watch<CriticalSectionRawMutex, bool>,
-}
-
-struct RwLock<T> {
-    inner: Mutex<CriticalSectionRawMutex, RwLockInner<T>>,
-}
-
-impl<T> RwLock<T> {
-    fn new(data: T) -> Self {
-        Self {
-            inner: Mutex::new(RwLockInner {
-                data,
-                writers: None,
-                readers: None,
-            }),
-        }
-    }
-}
 
 pub struct BleCentral {
     server: Server,
     conn: RefCell<Option<Connection>>,
+    status: Mutex<CriticalSectionRawMutex, bool>,
 }
 
 impl BleCentral {
-    pub fn init(sd: &mut &'static mut Softdevice) -> Self {
-        let server = Server::new(*sd, "12345678").unwrap();
+    pub fn init(sd: &mut Softdevice) -> Self {
+        let server = Server::new(sd, "12345678").unwrap();
         Self {
             server,
             conn: RefCell::new(None),
@@ -410,7 +395,7 @@ impl BleCentral {
         }
     }
 
-    pub async fn advertise_and_connect<S: NorFlash>(&mut self, bonder: &'static Bonder<'_, S>) {
+    pub async fn advertise_and_connect<S: NorFlash>(&self, bonder: &'static Bonder<'_, S>) {
         static ADV_DATA: LegacyAdvertisementPayload = LegacyAdvertisementBuilder::new()
             .flags(&[Flag::GeneralDiscovery, Flag::LE_Only])
             .services_16(
@@ -470,25 +455,10 @@ impl BleCentral {
         }
     }
 
-    /// Runs GATT server. This Funnction must be running conccurrently
-    /// to make other functions work
-    pub async fn connect(&self) {
-        if let Some(conn) = &self.conn {
-            {
-                let mut status = self.status.lock().await;
-                *status = true;
-            }
-            gatt_server::run(self.conn.as_ref().unwrap(), &self.server, |_| {}).await;
-            {
-                let mut status = self.status.lock().await;
-                *status = false;
-            }
-        }
-    }
-
     pub async fn keyboard_notify(&self, rep: &KeyboardReport) {
-        if self.active().await {
-            if let Some(conn) = &self.conn {
+        let active = self.status.lock().await;
+        if *active {
+            if let Some(conn) = self.conn.borrow().clone() {
                 let val = [
                     rep.modifier,
                     0,
@@ -505,8 +475,9 @@ impl BleCentral {
     }
 
     pub async fn mouse_notify(&self, rep: &MouseReport) {
-        if self.active().await {
-            if let Some(conn) = &self.conn {
+        let active = self.status.lock().await;
+        if *active {
+            if let Some(conn) = self.conn.borrow().clone() {
                 let buf = [
                     rep.buttons,
                     rep.x as u8,
@@ -520,9 +491,10 @@ impl BleCentral {
     }
 
     pub async fn battery_notify(&self, percentage: u8) {
-        if self.active().await {
-            if let Some(conn) = &self.conn {
-                self.server.bas.battery_level_notify(conn, percentage);
+        let active = self.status.lock().await;
+        if *active {
+            if let Some(conn) = self.conn.borrow().clone() {
+                self.server.bas.battery_level_notify(&conn, percentage);
             }
         }
     }
