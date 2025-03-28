@@ -208,17 +208,13 @@ impl<'a, S: NorFlash> SecurityHandler for Bonder<'a, S> {
         info!("On bonded");
         let mut bonds = self.bonds.borrow_mut();
 
-        let index = if bonds.len() == MAX_NUM_BONDS {
-            (Instant::now().as_ticks() % MAX_NUM_BONDS as u64) as u8
+        // Checks if the bond is already in the map and replaces the bond
+        // if it exists, otherwise find an empty index or randomly replace a bond
+        // if all slots are used
+        let index = if let Some((i, _)) = bonds.iter().find(|(_, p)| p.master_id == master_id) {
+            *i as u8
         } else {
-            let mut new_i = 0;
-            for i in 0..MAX_NUM_BONDS as u8 {
-                if !bonds.contains_key(&i) {
-                    new_i = i;
-                    break;
-                }
-            }
-            new_i
+            (Instant::now().as_ticks() % MAX_NUM_BONDS as u64) as u8
         };
         let val = Peer {
             index,

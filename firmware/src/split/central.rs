@@ -1,5 +1,9 @@
+use core::{borrow::Borrow, cell::RefCell};
+
 use defmt::{error, info};
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex, signal::Signal, watch::Watch,
+};
 use embedded_storage_async::nor_flash::NorFlash;
 use nrf_softdevice::{
     ble::{
@@ -19,13 +23,11 @@ use nrf_softdevice::{
     },
     raw, Softdevice,
 };
-use static_cell::StaticCell;
 use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 
 use crate::{
     bond::Bonder,
     descriptor::{CombinedReport, MouseReport},
-    storage::Storage,
 };
 
 const DEVICE_INFORMATION: Uuid = Uuid::new_16(0x180a);
@@ -372,34 +374,43 @@ impl gatt_server::Server for Server {
         None
     }
 }
-
-pub struct BleCentral<'a> {
-    server: &'a Server,
-    conn: Option<Connection>,
-    sd: &'a Mutex<CriticalSectionRawMutex, &'static Softdevice>,
-    status: Mutex<CriticalSectionRawMutex, bool>,
+struct RwLockInner<T> {
+    data: T,
+    writer_watch: Watch<CriticalSectionRawMutex, bool>,
 }
 
-impl<'a> BleCentral<'a> {
-    pub fn new(
-        server: &'a Server,
-        sd: &'a Mutex<CriticalSectionRawMutex, &'static Softdevice>,
-    ) -> Self {
+struct RwLock<T> {
+    inner: Mutex<CriticalSectionRawMutex, RwLockInner<T>>,
+}
+
+impl<T> RwLock<T> {
+    fn new(data: T) -> Self {
+        Self {
+            inner: Mutex::new(RwLockInner {
+                data,
+                writers: None,
+                readers: None,
+            }),
+        }
+    }
+}
+
+pub struct BleCentral {
+    server: Server,
+    conn: RefCell<Option<Connection>>,
+}
+
+impl BleCentral {
+    pub fn init(sd: &mut &'static mut Softdevice) -> Self {
+        let server = Server::new(*sd, "12345678").unwrap();
         Self {
             server,
-            conn: None,
-            sd,
+            conn: RefCell::new(None),
             status: Mutex::new(false),
         }
     }
-    async fn active(&self) -> bool {
-        *(self.status.lock().await)
-    }
 
-    pub async fn advertise<S: NorFlash>(&mut self, bonder: &'static Bonder<'_, S>) {
-        if self.active().await {
-            return;
-        }
+    pub async fn advertise_and_connect<S: NorFlash>(&mut self, bonder: &'static Bonder<'_, S>) {
         static ADV_DATA: LegacyAdvertisementPayload = LegacyAdvertisementBuilder::new()
             .flags(&[Flag::GeneralDiscovery, Flag::LE_Only])
             .services_16(
@@ -431,21 +442,32 @@ impl<'a> BleCentral<'a> {
             scan_data: &SCAN_DATA,
         };
 
-        let sd_ref = *(self.sd.lock().await);
-        let conn = peripheral::advertise_connectable(sd_ref, adv, &config)
+        // Safe as only mut sd ref existed only when creating servers
+        let sd = unsafe { Softdevice::steal() };
+        let conn = peripheral::advertise_connectable(sd, adv, &config)
             .await
             .unwrap();
-        self.conn = Some(conn);
-        self.conn
-            .as_mut()
-            .unwrap()
-            .set_conn_params(raw::ble_gap_conn_params_t {
+
+        {
+            let mut con_status = self.conn.borrow_mut();
+            let conn = con_status.insert(conn);
+            conn.set_conn_params(raw::ble_gap_conn_params_t {
                 min_conn_interval: 6,
                 max_conn_interval: 6,
                 slave_latency: 99,
                 conn_sup_timeout: 400,
             })
             .unwrap();
+            let mut status = self.status.lock().await;
+            *status = true;
+        }
+
+        gatt_server::run(self.conn.borrow().as_ref().unwrap(), &self.server, |_| {}).await;
+        {
+            self.conn.replace(None);
+            let mut status = self.status.lock().await;
+            *status = false;
+        }
     }
 
     /// Runs GATT server. This Funnction must be running conccurrently
@@ -456,7 +478,7 @@ impl<'a> BleCentral<'a> {
                 let mut status = self.status.lock().await;
                 *status = true;
             }
-            gatt_server::run(self.conn.as_ref().unwrap(), self.server, |_| {}).await;
+            gatt_server::run(self.conn.as_ref().unwrap(), &self.server, |_| {}).await;
             {
                 let mut status = self.status.lock().await;
                 *status = false;

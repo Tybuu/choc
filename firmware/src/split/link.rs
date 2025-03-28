@@ -1,10 +1,6 @@
 use core::{cell::UnsafeCell, future::Future, mem::MaybeUninit};
 
-use embassy_sync::{
-    blocking_mutex::raw::{CriticalSectionRawMutex, RawMutex},
-    channel::{Receiver, Sender},
-    mutex::Mutex,
-};
+use embassy_sync::{blocking_mutex::raw::RawMutex, channel::Sender};
 use nrf_softdevice::{
     ble::{
         central,
@@ -24,15 +20,11 @@ struct KeyClient {
 
 pub struct Link<'a, M: RawMutex, const N: usize> {
     tx: Sender<'a, M, u32, N>,
-    sd: &'a Mutex<CriticalSectionRawMutex, &'static Softdevice>,
 }
 
 impl<'a, M: RawMutex, const N: usize> Link<'a, M, N> {
-    pub fn new(
-        tx: Sender<'a, M, u32, N>,
-        sd: &'a Mutex<CriticalSectionRawMutex, &'static Softdevice>,
-    ) -> Self {
-        Self { tx, sd }
+    pub fn new(tx: Sender<'a, M, u32, N>) -> Self {
+        Self { tx }
     }
 
     pub async fn link<'b>(&'b mut self, addr: Address) {
@@ -42,8 +34,11 @@ impl<'a, M: RawMutex, const N: usize> Link<'a, M, N> {
         peer_config.conn_params.min_conn_interval = 6;
         peer_config.conn_params.max_conn_interval = 6;
         peer_config.conn_params.slave_latency = 99;
-        let sd_ref = &(self.sd.lock().await);
-        let peer_conn = central::connect(sd_ref, &peer_config).await.unwrap();
+
+        // Safe as only mut sd ref was when creating servers
+        let sd = unsafe { Softdevice::steal() };
+
+        let peer_conn = central::connect(sd, &peer_config).await.unwrap();
         let key_client: KeyClient = gatt_client::discover(&peer_conn).await.unwrap();
 
         key_client.state_cccd_write(true).await.unwrap();

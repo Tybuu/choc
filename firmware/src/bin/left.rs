@@ -23,7 +23,6 @@ use embassy_nrf::saadc::{Gain, Saadc};
 use embassy_nrf::{bind_interrupts, saadc};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel as SyncChannel;
-use embassy_sync::mutex::Mutex;
 // time driver
 use embassy_time::Timer;
 use nrf_softdevice::ble::{set_address, Address, AddressType};
@@ -36,6 +35,7 @@ use static_cell::StaticCell;
 
 static BONDER: StaticCell<Bonder<Flash>> = StaticCell::new();
 static STORAGE: StaticCell<Storage<Flash, u32>> = StaticCell::new();
+
 #[embassy_executor::task]
 async fn softdevice_task(sd: &'static Softdevice) -> ! {
     sd.run().await
@@ -97,19 +97,21 @@ async fn main(spawner: Spawner) {
     };
 
     let mut led = Output::new(p.P0_15, Level::Low, OutputDrive::Standard);
-    let sd = Softdevice::enable(&config);
+    let mut sd: &'static mut Softdevice = Softdevice::enable(&config);
 
     let addr = Address::new(
         AddressType::RandomStatic,
         [0x72u8, 0x72u8, 0x72u8, 0x72u8, 0x72u8, 0b11111111u8],
     );
     set_address(sd, &addr);
-    let server = unwrap!(Server::new(sd, "12345678"));
+    let mut central = BleCentral::init(&mut sd);
+
+    let sd = &*sd;
     unwrap!(spawner.spawn(softdevice_task(sd)));
     let storage: &'static Storage<Flash, u32> =
         STORAGE.init(Storage::init(Flash::take(&sd), NRF_FLASH_RANGE).await);
 
-    let mut columns = [
+    let columns = [
         Output::new(p.P1_00.degrade(), Level::Low, OutputDrive::Standard),
         Output::new(p.P0_11.degrade(), Level::Low, OutputDrive::Standard),
         Output::new(p.P1_04.degrade(), Level::Low, OutputDrive::Standard),
@@ -138,10 +140,9 @@ async fn main(spawner: Spawner) {
     let mut matrix = Matrix::new(columns, rows);
     let mut report = Report::default();
 
-    let sd_lock: Mutex<CriticalSectionRawMutex, _> = Mutex::new(&*sd);
-    let mut central = BleCentral::new(&server, &sd_lock);
+    let sd: &'static Softdevice = &*sd;
 
-    let mut link = Link::new(tx, &sd_lock);
+    let mut link = Link::new(tx);
     let bonder: &'static Bonder<_> = BONDER.init(Bonder::init(storage).await);
 
     loop {
