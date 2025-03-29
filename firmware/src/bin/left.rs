@@ -4,18 +4,16 @@
 use core::mem;
 
 use bruh78::battery::BatteryVoltage;
-use bruh78::bond::Bonder;
 use bruh78::config::load_colemak;
 use bruh78::keys::Keys;
 use bruh78::matrix::Matrix;
 use bruh78::report::Report;
-use bruh78::split::central::{BleCentral, Server};
+use bruh78::split::dual::{Dual, DualMode};
 use bruh78::split::link::Link;
-use bruh78::storage::{Storage, NRF_FLASH_RANGE};
 use defmt::{info, *};
 use embassy_executor::Spawner;
-use embassy_futures::select::select4;
 use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select3, select4};
 use embassy_nrf::gpio::Pin;
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::interrupt::{self, InterruptExt, Priority};
@@ -26,12 +24,11 @@ use embassy_sync::channel::Channel as SyncChannel;
 // time driver
 use embassy_time::Timer;
 use nrf_softdevice::ble::{set_address, Address, AddressType};
-use nrf_softdevice::{raw, Flash, Softdevice};
+use nrf_softdevice::{raw, Softdevice};
 
 use defmt_rtt as _; // global logger
 use embassy_nrf as _; // time driver
 use panic_probe as _;
-use static_cell::StaticCell;
 
 #[embassy_executor::task]
 async fn softdevice_task(sd: &'static Softdevice) -> ! {
@@ -95,14 +92,6 @@ async fn main(spawner: Spawner) {
 
     let sd: &'static mut Softdevice = Softdevice::enable(&config);
 
-    let addr = Address::new(
-        AddressType::RandomStatic,
-        [0x72u8, 0x72u8, 0x72u8, 0x72u8, 0x72u8, 0b11111111u8],
-    );
-    set_address(sd, &addr);
-    let central = BleCentral::init(sd);
-    unwrap!(spawner.spawn(softdevice_task(sd)));
-
     let columns = [
         Output::new(p.P1_00.degrade(), Level::Low, OutputDrive::Standard),
         Output::new(p.P0_11.degrade(), Level::Low, OutputDrive::Standard),
@@ -118,6 +107,39 @@ async fn main(spawner: Spawner) {
         Input::new(p.P0_10.degrade(), Pull::Down),
     ];
 
+    let mut mode = DualMode::Central;
+    let mut matrix = Matrix::new(columns, rows);
+
+    let select_mode = async {
+        loop {
+            let mut states = [[false; 5]; 4];
+            matrix.scan(&mut states).await;
+            if states[0][4] {
+                mode = DualMode::Peripheral;
+                break;
+            } else {
+                mode = DualMode::Central;
+            }
+            Timer::after_secs(2).await;
+        }
+    };
+    select(select_mode, Timer::after_secs(2)).await;
+
+    let addr = match mode {
+        DualMode::Central => Address::new(
+            AddressType::RandomStatic,
+            [0x72u8, 0x72u8, 0x72u8, 0x72u8, 0x72u8, 0b11111111u8],
+        ),
+        DualMode::Peripheral => Address::new(
+            AddressType::RandomStatic,
+            [0x72u8, 0x72u8, 0x72u8, 0x71u8, 0x71u8, 0b11111111u8],
+        ),
+    };
+    set_address(sd, &addr);
+
+    let dual = Dual::new(sd, mode);
+    unwrap!(spawner.spawn(softdevice_task(sd)));
+
     let mut keys = Keys::<39>::default();
     load_colemak(&mut keys);
 
@@ -129,10 +151,9 @@ async fn main(spawner: Spawner) {
     let channel = SyncChannel::<CriticalSectionRawMutex, u32, 10>::new();
     let tx = channel.sender();
     let rx = channel.receiver();
-    let mut matrix = Matrix::new(columns, rows);
     let mut report = Report::default();
 
-    let mut link = Link::new(tx);
+    let link = Link::new(tx);
 
     loop {
         info!("start loop");
@@ -140,7 +161,7 @@ async fn main(spawner: Spawner) {
             loop {
                 match battery.update_reading().await {
                     Some(percentage) => {
-                        central.battery_notify(percentage).await;
+                        dual.battery_notify(percentage).await;
                     }
                     None => {}
                 }
@@ -180,30 +201,17 @@ async fn main(spawner: Spawner) {
                         }
                     }
                 }
-                let (key, mouse) = report.generate_report(&mut keys);
-                match key {
-                    Some(rep) => {
-                        central.keyboard_notify(rep).await;
-                    }
-                    _ => {}
-                };
-                match mouse {
-                    Some(rep) => {
-                        central.mouse_notify(rep).await;
-                    }
-                    None => {}
-                }
+                dual.report(&mut keys, &mut report).await;
                 Timer::after_micros(5).await;
             }
         };
 
-        let cen_server = central.connect();
         let pair_addr = Address::new(
             AddressType::RandomStatic,
             [0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0b11111111u8],
         );
 
-        let link_server = link.link(pair_addr);
-        let _res = select4(cen_server, link_server, main_loop, battery_loop).await;
+        let dual_server = dual.connect(&link, pair_addr);
+        let _res = select3(dual_server, main_loop, battery_loop).await;
     }
 }

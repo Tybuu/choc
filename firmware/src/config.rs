@@ -25,6 +25,7 @@ pub fn load_callum<const S: usize>(keys: &mut Keys<S>) {
     keys.set_code(KeyCodes::KeyboardVv, 13, 0);
     keys.set_code(KeyCodes::KeyboardBb, 14, 0);
 
+    keys.set_code(KeyCodes::Layer4, 15, 0);
     keys.set_combined(KeyCodes::Layer1, KeyCodes::Layer3, 34, 16, 0);
     keys.set_code(KeyCodes::KeyboardSpacebar, 17, 0);
 
@@ -338,6 +339,7 @@ pub fn load_colemak<const S: usize>(keys: &mut Keys<S>) {
     keys.set_code(KeyCodes::KeyboardDd, 13, 0);
     keys.set_code(KeyCodes::KeyboardVv, 14, 0);
 
+    keys.set_code(KeyCodes::Layer4, 15, 0);
     keys.set_combined(KeyCodes::Layer1, KeyCodes::Layer3, 34, 16, 0);
     keys.set_code(KeyCodes::KeyboardSpacebar, 17, 0);
 
@@ -598,5 +600,4 @@ pub fn load_colemak<const S: usize>(keys: &mut Keys<S>) {
     keys.set_combined(KeyCodes::Layer2, KeyCodes::Layer3, 16, 34, 3);
 
     // Layer 4
-    keys.set_config(load_callum, 15, 4);
 }

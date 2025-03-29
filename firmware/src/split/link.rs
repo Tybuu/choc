@@ -27,7 +27,7 @@ impl<'a, M: RawMutex, const N: usize> Link<'a, M, N> {
         Self { tx }
     }
 
-    pub async fn link<'b>(&'b mut self, addr: Address) {
+    pub async fn link(&self, addr: Address) {
         let peer_addr = [&addr];
         let mut peer_config = central::ConnectConfig::default();
         peer_config.scan_config.whitelist = Some(&peer_addr);

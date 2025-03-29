@@ -32,18 +32,7 @@ async fn softdevice_task(sd: &'static Softdevice) -> ! {
     sd.run().await
 }
 
-#[nrf_softdevice::gatt_service(uuid = "9e7312e0-2354-11eb-9f10-fbc30a62cf38")]
-struct KeyClient {
-    #[characteristic(uuid = "9e7312e0-2354-11eb-9f10-fbc30a63cf38", read, write, notify)]
-    state: u32,
-    #[characteristic(uuid = "9e7312e0-2354-11eb-9f10-fbc30a63cf39", read, write, notify)]
-    mouse_state: u16,
-}
-
-#[nrf_softdevice::gatt_server]
-struct Server {
-    key_client: KeyClient,
-}
+static PERP_NAME: &str = "TybeastR";
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -142,6 +131,6 @@ async fn main(spawner: Spawner) {
                 Timer::after_micros(5).await;
             }
         };
-        select(peripheral.connect(), main_loop).await;
+        select(peripheral.connect(PERP_NAME), main_loop).await;
     }
 }

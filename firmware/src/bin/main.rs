@@ -57,8 +57,6 @@ async fn main(_spawner: Spawner) {
     // Create the driver, from the HAL.
     let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
 
-    let mut led = Output::new(p.P0_15, Level::Low, OutputDrive::Standard);
-
     // Create embassy-usb Config
     let mut config = Config::new(0xa55, 0xa44);
     config.manufacturer = Some("Tybeast bruh");
@@ -178,7 +176,6 @@ async fn main(_spawner: Spawner) {
     let led_loop = async {
         let mut state = true;
         loop {
-            led.set_level(state.into());
             state = !state;
             Timer::after_millis(2000).await;
         }

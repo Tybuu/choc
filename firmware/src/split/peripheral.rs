@@ -47,20 +47,20 @@ impl BlePeripheral {
         *status = false;
     }
 
-    pub async fn connect(&self) {
-        static ADV_DATA: LegacyAdvertisementPayload = LegacyAdvertisementBuilder::new()
+    pub async fn connect(&self, name: &'static str) {
+        let adv_data: LegacyAdvertisementPayload = LegacyAdvertisementBuilder::new()
             .flags(&[Flag::GeneralDiscovery, Flag::LE_Only])
             .services_128(
                 ServiceList::Complete,
                 &[0x9e7312e0_2354_11eb_9f10_fbc30a62cf38_u128.to_le_bytes()],
             )
-            .full_name("TybeastR")
+            .full_name(name)
             .build();
 
         let config = peripheral::Config::default();
         static SCAN_DATA: [u8; 0] = [];
         let adv = peripheral::ConnectableAdvertisement::ScannableUndirected {
-            adv_data: &ADV_DATA,
+            adv_data: &adv_data,
             scan_data: &SCAN_DATA,
         };
         let sd = unsafe { Softdevice::steal() };
